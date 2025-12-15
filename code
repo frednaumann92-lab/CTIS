@@ -1,0 +1,992 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Incident Command & Unit Status Tracker</title>
+    <style>
+        /* --- CSS STYLING: TACTICAL DARK THEME --- */
+
+        :root {
+            /* Color Palette */
+            --bg-dark: #111;
+            --bg-card: #2c2c2c;
+            --text-white: #ffffff;
+            --accent-green: #38c172; 
+            --accent-blue: #0099ff; 
+            
+            /* Escalation Colors and Times */
+            --warning-yellow: #ffc107; 
+            --alert-red: #dc3545; 
+            --critical-dark-red: #9e1b29;
+
+            /* Category Colors */
+            --cat-med: #ff4747;    
+            --cat-fire: #ff9900;   
+            --cat-pd: #0099ff;     
+            --cat-support: #33cc33; 
+            --cat-unknown: #808080;  
+
+            /* Time Constants */
+            --time-warning-ms: 120000;
+            --time-alert-ms: 180000;
+            --time-critical-ms: 300000; 
+        }
+
+        body {
+            font-family: 'Consolas', 'Courier New', monospace;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: var(--bg-dark);
+            color: var(--text-white);
+            padding: 25px;
+            margin: 0;
+            transition: all 0.5s;
+        }
+
+        h1, h2, h3 {
+            color: var(--text-white);
+            text-transform: uppercase;
+        }
+
+        .main-container {
+            display: flex;
+            gap: 30px;
+            width: 100%;
+            max-width: 1500px; 
+            margin-bottom: 30px;
+        }
+
+        /* Wallboard Mode Container Styling */
+        body.wallboard-mode .main-container {
+            max-width: 1800px;
+        }
+        
+        .system-time-container, .tracker-section, .incident-management {
+            background: var(--bg-card);
+            padding: 25px;
+            border-radius: 5px;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--bg-card); /* Use a darker border for continuity */
+            transition: all 0.5s;
+        }
+
+        .system-time-container {
+            width: 300px; 
+            display: flex; 
+            flex-direction: column;
+        }
+        
+        .tracker-section {
+            flex: 2; 
+        }
+
+        .incident-management {
+            flex: 1.5; 
+            display: flex;
+            flex-direction: column;
+        }
+        
+        /* DIGITAL CLOCK STYLING */
+        #digital-clock {
+            font-size: 3em;
+            font-weight: bold;
+            color: var(--text-white);
+            margin-bottom: 10px;
+            text-align: center;
+            padding: 10px;
+            border: 2px solid var(--text-white);
+            border-radius: 3px;
+            background-color: #000;
+            box-shadow: 0 0 10px rgba(255, 255, 255, 0.4); 
+            text-shadow: 0 0 5px rgba(255, 255, 255, 0.8);
+        }
+        
+        /* WALLBOARD MODE: Enlarge Clock & Timers */
+        body.wallboard-mode #digital-clock {
+            font-size: 4em;
+        }
+        body.wallboard-mode #incident-display {
+            font-size: 2.8em;
+        }
+        body.wallboard-mode .tracker-item .tracker-time {
+            font-size: 2.4em;
+        }
+        body.wallboard-mode #shift-countdown-timer {
+             font-size: 3em;
+        }
+
+        #current-date {
+            font-size: 1.1em;
+            text-align: center;
+            color: var(--accent-green);
+            margin-top: 5px;
+            margin-bottom: 20px;
+        }
+
+        .countdown-display h3 {
+            color: var(--accent-blue);
+            margin-bottom: 5px;
+            font-size: 1em;
+        }
+
+        #shift-countdown-timer {
+            font-size: 2em;
+            font-weight: bold;
+            color: var(--text-white);
+        }
+
+        /* INCIDENT MANAGEMENT */
+        
+        #incident-display {
+            font-size: 1.8em;
+            font-weight: bold;
+            color: var(--warning-yellow);
+            text-align: center;
+            padding: 10px;
+            border: 1px solid var(--warning-yellow);
+            border-radius: 3px;
+            margin-bottom: 15px;
+            background-color: #333;
+        }
+        
+        #incident-name-display {
+             font-size: 1.5em;
+             font-weight: bold;
+             color: var(--accent-blue);
+             text-align: center;
+             margin-bottom: 15px;
+        }
+
+        #incident-log-container {
+            background-color: #1a1a1a;
+            border: 1px solid #3a3a3a;
+            border-radius: 3px;
+            flex-grow: 1;
+            padding: 10px;
+            max-height: 400px;
+            overflow-y: auto;
+            display: flex; 
+            flex-direction: column-reverse; 
+        }
+        
+        body.wallboard-mode #incident-log-container {
+             max-height: 600px; 
+        }
+
+        .log-entry {
+            border-bottom: 1px dashed #3a3a3a;
+            padding: 5px 0;
+            font-size: 0.9em;
+            color: #ccc;
+        }
+        .log-time {
+            color: var(--accent-blue);
+            font-weight: bold;
+            margin-right: 8px;
+        }
+
+        /* --- CONTROLS AND BUTTONS --- */
+        
+        .toggle-mode-container {
+            width: 100%;
+            max-width: 1500px;
+            text-align: right;
+            margin-bottom: 15px;
+        }
+        
+        #status-summary {
+             display: flex;
+             justify-content: space-around;
+             margin-bottom: 20px;
+             text-align: center;
+             background-color: #1a1a1a;
+             padding: 10px;
+             border-radius: 5px;
+        }
+        .status-box {
+             padding: 5px 15px;
+        }
+        .status-count {
+             font-size: 1.5em;
+             font-weight: bold;
+             color: var(--accent-green);
+        }
+        .status-label {
+             font-size: 0.8em;
+             color: #aaa;
+             text-transform: uppercase;
+        }
+
+
+        /* Hide all control elements in Wallboard Mode */
+        body.wallboard-mode .incident-controls,
+        body.wallboard-mode .tracker-controls,
+        body.wallboard-mode #export-log,
+        body.wallboard-mode #incident-name-input,
+        body.wallboard-mode #unit-category-select,
+        body.wallboard-mode #tracker-name-input {
+            display: none !important;
+        }
+
+        /* Wallboard Mode: Hide Unit Action Buttons */
+        body.wallboard-mode .tracker-actions {
+             display: none !important;
+        }
+        
+        /* Buttons/Inputs (General) */
+        input[type="text"], select {
+            padding: 10px;
+            border: 1px solid #555;
+            border-radius: 3px;
+            background-color: #3a3a3a;
+            color: var(--text-white);
+            font-family: 'Consolas', monospace;
+            flex-grow: 1;
+        }
+        select {
+            flex-grow: 0.5;
+            min-width: 100px;
+        }
+
+        .tracker-controls, .incident-controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        
+        .tracker-controls button, .incident-controls button, #mode-toggle-button {
+            padding: 10px 15px;
+            border: none;
+            border-radius: 3px;
+            cursor: pointer;
+            font-weight: bold;
+            text-transform: uppercase;
+            transition: background-color 0.2s;
+        }
+        
+        #mode-toggle-button {
+             background-color: var(--accent-blue);
+             color: var(--bg-dark);
+        }
+        
+        /* --- UNIT STATUS TRACKER STYLES (ESCALATION + CATEGORIES) --- */
+        
+        #trackers-list {
+            list-style: none; 
+            padding: 0;
+            margin: 0;
+        }
+        
+        .tracker-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 15px;
+            margin-bottom: 10px;
+            background-color: #3a3a3a;
+            border-radius: 5px;
+            border-left: 5px solid var(--cat-unknown); 
+        }
+
+        /* Category Left Border Colors */
+        .tracker-item[data-category="MED"] { border-left-color: var(--cat-med); }
+        .tracker-item[data-category="FIRE"] { border-left-color: var(--cat-fire); }
+        .tracker-item[data-category="PD"] { border-left-color: var(--cat-pd); }
+        .tracker-item[data-category="SUPPORT"] { border-left-color: var(--cat-support); }
+        .tracker-item[data-category="UNKNOWN"] { border-left-color: var(--cat-unknown); }
+        
+        .tracker-info {
+            display: flex;
+            flex-direction: column;
+        }
+        .tracker-category {
+            font-size: 0.8em;
+            color: #ccc;
+            text-transform: uppercase;
+        }
+
+        /* ESCALATION STATUS OVERRIDES */
+        .tracker-item.warning-status {
+            background-color: #4a4a3a;
+        }
+        .tracker-item.alert-status {
+            background-color: var(--alert-red); 
+            border-left: 5px solid var(--text-white) !important; 
+            box-shadow: 0 0 10px rgba(220, 53, 69, 0.8);
+        }
+        @keyframes pulse {
+            0% { background-color: var(--critical-dark-red); }
+            50% { background-color: var(--alert-red); }
+            100% { background-color: var(--critical-dark-red); }
+        }
+        .tracker-item.critical-status {
+            animation: pulse 1s infinite alternate; 
+            border-left: 5px solid var(--warning-yellow) !important; 
+            box-shadow: 0 0 15px var(--alert-red);
+        }
+
+        .tracker-name {
+            font-weight: bold;
+            font-size: 1.2em;
+            color: var(--text-white);
+            text-transform: capitalize;
+        }
+
+        .tracker-time {
+            font-size: 1.6em;
+            color: var(--text-white);
+            text-shadow: 0 0 3px rgba(255, 255, 255, 0.5);
+        }
+        
+        /* Button Styles */
+        .check-btn {
+            background-color: var(--text-white);
+            color: var(--bg-dark);
+            font-weight: bolder;
+        }
+        .stop-btn {
+            background-color: var(--alert-red);
+            color: white;
+        }
+        .resume-btn {
+            background-color: var(--accent-green);
+            color: var(--bg-dark);
+        }
+        .delete-btn {
+            background-color: #6c757d;
+            color: white;
+        }
+    </style>
+</head>
+<body>
+
+    <audio id="alert-sound" src="https://assets.mixkit.co/sfx/preview/mixkit-analog-stopwatch-or-timer-start-2849.mp3" preload="auto"></audio>
+    
+    <div class="toggle-mode-container">
+        <button id="mode-toggle-button">ACTIVATE WALLBOARD MODE</button>
+    </div>
+
+    <h1><span style="color:var(--accent-green)">// COMMAND</span> <span style="color:var(--text-white)">TIME & INCIDENT SYSTEM</span></h1>
+
+    <div class="main-container">
+
+        <div class="system-time-container">
+            <h2>Current System Time</h2>
+            <div id="digital-clock"></div>
+            <div id="current-date"></div>
+
+            <div class="countdown-display">
+                <h3>SHIFT END COUNTDOWN (06:00:00 AM)</h3>
+                <div id="shift-countdown-timer">--:--:--</div>
+            </div>
+            
+        </div>
+        
+        <div class="incident-management">
+            <h2>Incident Command Log 
+                <button id="export-log" disabled>EXPORT LOG</button>
+            </h2>
+
+            <div id="incident-name-display" style="display:none;"></div>
+            
+            <h3 style="color:var(--warning-yellow);">Incident Timer Elapsed:</h3>
+            <div id="incident-display">00:00:00.00</div>
+
+            <div class="incident-controls">
+                <input type="text" id="incident-name-input" placeholder="ENTER INCIDENT NAME (e.g., 'CODE RED')" value="ACTIVE INCIDENT">
+                <button id="start-incident">ACTIVATE</button>
+                <button id="end-incident" style="display:none;">TERMINATE</button>
+            </div>
+            
+            <h3>Log Entry:</h3>
+            <div class="incident-controls">
+                <input type="text" id="log-entry-input" placeholder="Enter log details (e.g., 'Unit 1 deployed')" disabled>
+                <button id="add-log" disabled>LOG ENTRY</button>
+            </div>
+            
+            <div id="incident-log-container">
+                </div>
+        </div>
+
+        <div class="tracker-section">
+            <h2>Unit Status Tracker // Active</h2>
+            
+            <div id="status-summary">
+                <div class="status-box" id="total-count">
+                    <div class="status-count">0</div>
+                    <div class="status-label">Total Units</div>
+                </div>
+                <div class="status-box" id="alert-count"> 
+                    <div class="status-count">0</div>
+                    <div class="status-label">Alert Status</div>
+                </div>
+                <div class="status-box" id="halted-count">
+                    <div class="status-count">0</div>
+                    <div class="status-label">Halted Units</div>
+                </div>
+            </div>
+
+            <div class="tracker-controls">
+                <select id="unit-category-select">
+                    <option value="UNKNOWN">-- SELECT CATEGORY --</option>
+                    <option value="MED">MED (Medical)</option>
+                    <option value="FIRE">FIRE (Fire/Rescue)</option>
+                    <option value="PD">PD (Police)</option>
+                    <option value="SUPPORT">SUPPORT (Logistics/Other)</option>
+                </select>
+                <input type="text" id="tracker-name-input" placeholder="ENTER UNIT ID / NAME">
+                <button id="start-tracker">➕ ACTIVATE UNIT</button>
+                <button id="reset-tracker">GLOBAL WIPE</button>
+            </div>
+
+            <ul id="trackers-list">
+                </ul>
+        </div>
+    </div>
+
+    <script>
+        // --- JAVASCRIPT LOGIC ---
+
+        // Global Elements
+        const digitalClock = document.getElementById('digital-clock');
+        const currentDateDisplay = document.getElementById('current-date');
+        const shiftCountdownTimer = document.getElementById('shift-countdown-timer'); 
+        const alertSound = document.getElementById('alert-sound');
+        const originalTitle = document.title;
+        let alertInterval;
+        
+        // Wallboard Mode Elements
+        const body = document.body;
+        const modeToggleButton = document.getElementById('mode-toggle-button');
+
+        // Incident Elements
+        const incidentDisplay = document.getElementById('incident-display');
+        const incidentNameInput = document.getElementById('incident-name-input');
+        const incidentNameDisplay = document.getElementById('incident-name-display');
+        const startIncidentButton = document.getElementById('start-incident');
+        const endIncidentButton = document.getElementById('end-incident');
+        const logEntryInput = document.getElementById('log-entry-input');
+        const addLogButton = document.getElementById('add-log');
+        const exportLogButton = document.getElementById('export-log');
+        const incidentLogContainer = document.getElementById('incident-log-container');
+        
+        // Tracker Elements
+        const trackersList = document.getElementById('trackers-list');
+        const trackerNameInput = document.getElementById('tracker-name-input');
+        const startTrackerButton = document.getElementById('start-tracker');
+        const resetButton = document.getElementById('reset-tracker');
+        const unitCategorySelect = document.getElementById('unit-category-select'); 
+
+        // Status Summary Elements
+        const totalCountDisplay = document.querySelector('#total-count .status-count');
+        const alertCountDisplay = document.querySelector('#alert-count .status-count');
+        const haltedCountDisplay = document.querySelector('#halted-count .status-count');
+
+
+        let activeTrackers = []; // Renamed for clarity
+        let logHistory = [];
+        let mainTimerInterval; // Renamed to avoid collision/confusion with trackerInterval
+        let alertIsActive = false;
+        
+        // Escalation Time Constants
+        const TIME_WARNING = 120000; // 2 minutes
+        const TIME_ALERT = 180000;   // 3 minutes
+        const TIME_CRITICAL = 300000; // 5 minutes
+        const SHIFT_END_HOUR = 6; 
+
+        let incidentTimer = {
+            isRunning: false,
+            startTime: 0,
+            totalTime: 0,
+            name: "NO ACTIVE INCIDENT"
+        };
+        
+        let isWallboardMode = false;
+
+        // --- CORE UTILITIES ---
+
+        function formatTime(ms) {
+            const totalSeconds = Math.floor(ms / 1000);
+            const milliseconds = String(Math.floor(ms % 1000 / 10)).padStart(2, '0'); 
+            const seconds = String(totalSeconds % 60).padStart(2, '0');
+            const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0');
+            const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+
+            return `${hours}:${minutes}:${seconds}.${milliseconds}`;
+        }
+        
+        function formatTimeHMSS(ms) {
+            if (ms <= 0) return "00:00:00";
+            
+            const totalSeconds = Math.floor(ms / 1000);
+            const seconds = String(totalSeconds % 60).padStart(2, '0');
+            const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0');
+            const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+
+            return `${hours}:${minutes}:${seconds}`;
+        }
+        
+        function getTrackerStatusClass(time) {
+            if (time >= TIME_CRITICAL) {
+                return 'critical-status';
+            } else if (time >= TIME_ALERT) {
+                return 'alert-status';
+            } else if (time >= TIME_WARNING) {
+                return 'warning-status';
+            }
+            return '';
+        }
+
+        // --- UNIT CLASS (The fixed, robust part) ---
+        class UnitTracker {
+            constructor(name, category) {
+                this.id = Date.now();
+                this.name = name;
+                this.category = category;
+                this.totalTime = 0;
+                this.startTime = Date.now();
+                this.isRunning = true;
+            }
+
+            getTimeElapsed(now) {
+                if (this.isRunning) {
+                    this.totalTime += (now - this.startTime);
+                    this.startTime = now; 
+                }
+                return this.totalTime;
+            }
+
+            getDisplayTime() {
+                // Use the main formatTime function for consistency
+                return formatTime(this.totalTime);
+            }
+
+            getStatusClass() {
+                return getTrackerStatusClass(this.totalTime);
+            }
+            
+            toggle(shouldRun) {
+                if (shouldRun !== undefined) {
+                    this.isRunning = shouldRun;
+                } else {
+                    this.isRunning = !this.isRunning;
+                }
+
+                if (this.isRunning) {
+                    this.startTime = Date.now(); 
+                }
+            }
+
+            checkIn() {
+                this.totalTime = 0;
+                this.startTime = Date.now();
+                this.isRunning = true;
+            }
+        }
+
+
+        // --- 1. GLOBAL CLOCK & ALERTS ---
+        function updateShiftCountdown() {
+            const now = new Date();
+            let shiftEnd = new Date(now);
+
+            shiftEnd.setHours(SHIFT_END_HOUR, 0, 0, 0);
+
+            if (now.getTime() >= shiftEnd.getTime()) {
+                shiftEnd.setDate(shiftEnd.getDate() + 1);
+            }
+
+            const timeRemaining = shiftEnd.getTime() - now.getTime();
+            
+            shiftCountdownTimer.textContent = formatTimeHMSS(timeRemaining);
+            
+            if (timeRemaining < 3600000) { 
+                shiftCountdownTimer.style.color = 'var(--warning-yellow)';
+            } else {
+                shiftCountdownTimer.style.color = 'var(--text-white)';
+            }
+        }
+
+
+        function updateGlobalClock() {
+            const now = new Date();
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            const milliseconds = String(now.getMilliseconds()).padStart(3, '0').slice(0, 2); // Show centiseconds
+            
+            digitalClock.textContent = `${hours}:${minutes}:${seconds}.${milliseconds}`;
+
+            const options = { day: '2-digit', month: 'short', year: 'numeric' };
+            const dateStr = now.toLocaleDateString('en-GB', options);
+            const timeStr = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+            currentDateDisplay.textContent = `${dateStr.toUpperCase()} ZULU ${timeStr.toUpperCase()}`;
+            
+            updateShiftCountdown();
+        }
+        
+        setInterval(updateGlobalClock, 100); 
+        updateGlobalClock(); 
+        
+        function toggleTitleAlert() {
+            document.title = document.title === originalTitle ? `*** ALERT *** ${originalTitle}` : originalTitle;
+        }
+
+        function setAlertStatus(isActive) {
+            if (isActive === alertIsActive) return;
+
+            alertIsActive = isActive;
+            if (alertIsActive) {
+                if (!alertInterval) {
+                    alertInterval = setInterval(toggleTitleAlert, 500); 
+                    alertSound.currentTime = 0;
+                    alertSound.play().catch(e => console.warn("Audio playback failed (user interaction required):", e));
+                }
+            } else {
+                clearInterval(alertInterval);
+                alertInterval = null;
+                document.title = originalTitle;
+            }
+        }
+        
+        modeToggleButton.addEventListener('click', toggleWallboardMode);
+
+        function toggleWallboardMode() {
+            isWallboardMode = !isWallboardMode;
+            
+            if (isWallboardMode) {
+                body.classList.add('wallboard-mode');
+                modeToggleButton.textContent = 'EXIT WALLBOARD MODE';
+                modeToggleButton.style.backgroundColor = 'var(--alert-red)';
+            } else {
+                body.classList.remove('wallboard-mode');
+                modeToggleButton.textContent = 'ACTIVATE WALLBOARD MODE';
+                modeToggleButton.style.backgroundColor = 'var(--accent-blue)';
+            }
+            // Re-render trackers to adjust button visibility
+            renderTrackers();
+        }
+
+
+        // --- 2. INCIDENT LOGIC ---
+        
+        function scrollLog() {
+            incidentLogContainer.scrollTop = 0; 
+        }
+
+        function updateIncidentTimer() {
+            if (incidentTimer.isRunning) {
+                const now = Date.now();
+                const elapsedTime = now - incidentTimer.startTime;
+                incidentTimer.totalTime += elapsedTime;
+                incidentTimer.startTime = now;
+                
+                incidentDisplay.textContent = formatTime(incidentTimer.totalTime);
+            }
+        }
+        
+        function logEntry(text) {
+            const now = new Date();
+            const timestamp = now.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+            const logString = `[${timestamp}] ${text}`;
+            
+            logHistory.push(logString);
+
+            const entry = document.createElement('div');
+            entry.className = 'log-entry';
+            entry.innerHTML = `<span class="log-time">[${timestamp}]</span> ${text}`;
+            incidentLogContainer.prepend(entry);
+            
+            exportLogButton.disabled = logHistory.length === 0;
+            
+            scrollLog();
+        }
+
+        startIncidentButton.addEventListener('click', () => {
+            if (!incidentTimer.isRunning) {
+                const name = incidentNameInput.value.trim().toUpperCase() || "UNNAMED INCIDENT";
+                
+                incidentTimer.isRunning = true;
+                incidentTimer.startTime = Date.now();
+                incidentTimer.totalTime = 0;
+                incidentTimer.name = name; 
+
+                incidentNameInput.style.display = 'none';
+                incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${name}`;
+                incidentNameDisplay.style.display = 'block';
+                
+                startIncidentButton.style.display = 'none';
+                endIncidentButton.style.display = 'block';
+                logEntryInput.disabled = false;
+                addLogButton.disabled = false;
+
+                logEntry(`INCIDENT ACTIVATED: ${name}. TIMER RESTART.`);
+
+                if (!mainTimerInterval) startMainUpdateLoop(); 
+            }
+        });
+
+        endIncidentButton.addEventListener('click', () => {
+            if (incidentTimer.isRunning) {
+                incidentTimer.isRunning = false;
+                
+                logEntry(`INCIDENT TERMINATED: ${incidentTimer.name}. Total Time Elapsed: ${formatTime(incidentTimer.totalTime)}`);
+                
+                incidentNameInput.style.display = 'block';
+                incidentNameDisplay.style.display = 'none';
+
+                startIncidentButton.style.display = 'block';
+                endIncidentButton.style.display = 'none';
+                logEntryInput.disabled = true;
+                addLogButton.disabled = true;
+                incidentDisplay.textContent = formatTime(incidentTimer.totalTime);
+                
+                if (activeTrackers.length === 0) {
+                    stopMainUpdateLoop();
+                }
+            }
+        });
+
+        addLogButton.addEventListener('click', () => {
+            const entryText = logEntryInput.value.trim();
+            if (entryText && incidentTimer.isRunning) {
+                logEntry(entryText.toUpperCase());
+                logEntryInput.value = '';
+            }
+        });
+        
+        logEntryInput.addEventListener('keypress', function (e) {
+            if (e.key === 'Enter') {
+                e.preventDefault();
+                addLogButton.click();
+            }
+        });
+        
+        exportLogButton.addEventListener('click', () => {
+            const logText = logHistory.slice().reverse().join('\n');
+            const incidentNameForFile = incidentTimer.name.toUpperCase().replace(/[^a-z0-9]/gi, '_');
+            const filename = `ICS_Log_${incidentNameForFile}_${new Date().toISOString().slice(0, 10)}.txt`;
+
+            const blob = new Blob([`INCIDENT REPORT: ${incidentTimer.name}\nGENERATED: ${new Date().toLocaleString()}\n--------------------------------\n${logText}`], { type: 'text/plain' });
+            
+            const link = document.createElement('a');
+            link.href = URL.createObjectURL(blob);
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            
+            logEntry("INCIDENT LOG EXPORTED.");
+        });
+
+
+        // --- 3. UNIT STATUS TRACKER LOGIC (Integrated Fix) ---
+
+        function updateStatusSummary() {
+            const alerts = activeTrackers.filter(t => t.totalTime >= TIME_ALERT).length; 
+
+            totalCountDisplay.textContent = activeTrackers.length;
+            alertCountDisplay.textContent = alerts;
+            haltedCountDisplay.textContent = activeTrackers.filter(t => !t.isRunning).length;
+            
+            setAlertStatus(alerts > 0);
+        }
+
+        // Event delegation for unit actions (Halt, Resume, Check, Purge)
+        function attachUnitActionListeners() {
+            trackersList.onclick = (e) => {
+                const button = e.target.closest('button');
+                if (!button) return;
+
+                const li = e.target.closest('.tracker-item');
+                if (!li) return;
+                
+                const id = parseInt(li.getAttribute('data-id'));
+                const tracker = activeTrackers.find(t => t.id === id);
+
+                if (!tracker) {
+                    console.error("Tracker not found for ID:", id);
+                    return;
+                }
+
+                if (button.classList.contains('stop-btn') || button.classList.contains('resume-btn')) {
+                    tracker.toggle();
+                    logEntry(`UNIT STATUS CHANGE: ${tracker.name} is now ${tracker.isRunning ? 'RESUMED' : 'HALTED'}.`);
+                } else if (button.classList.contains('check-btn')) {
+                    tracker.checkIn();
+                    logEntry(`UNIT CHECK-IN: ${tracker.name} timer reset to zero.`);
+                } else if (button.classList.contains('delete-btn')) {
+                    deleteUnit(id);
+                    return; // Delete handles its own render
+                }
+                
+                renderTrackers();
+            };
+        }
+
+        function renderTrackers() {
+            trackersList.innerHTML = ''; 
+            
+            activeTrackers.forEach(tracker => {
+                const li = document.createElement('li');
+                li.className = `tracker-item ${tracker.getStatusClass()}`;
+                li.setAttribute('data-id', tracker.id);
+                li.setAttribute('data-category', tracker.category.toUpperCase());
+
+                let actionButtonHTML = '';
+                let purgeButtonHTML = '';
+                
+                if (!isWallboardMode) {
+                    const isAlertOrHigher = tracker.totalTime >= TIME_ALERT;
+                    
+                    if (isAlertOrHigher && tracker.isRunning) {
+                        actionButtonHTML = `<button class="check-btn">✅ CHECK</button>`;
+                    } else if (tracker.isRunning) {
+                        actionButtonHTML = `<button class="stop-btn stop-btn">HALT</button>`;
+                    } else {
+                        actionButtonHTML = `<button class="resume-btn resume-btn">RESUME</button>`;
+                    }
+                    purgeButtonHTML = `<button class="delete-btn delete-btn">PURGE</button>`;
+                }
+
+                li.innerHTML = `
+                    <div class="tracker-info">
+                        <span class="tracker-name">${tracker.name}</span>
+                        <span class="tracker-category">${tracker.category}</span>
+                    </div>
+                    <span class="tracker-time">${tracker.getDisplayTime()}</span>
+                    <div class="tracker-actions">
+                        ${actionButtonHTML}
+                        ${purgeButtonHTML}
+                    </div>
+                `;
+                trackersList.appendChild(li);
+            });
+            
+            updateStatusSummary();
+        }
+        
+        startTrackerButton.addEventListener('click', () => {
+            const name = trackerNameInput.value.trim().toUpperCase() || "UNNAMED UNIT";
+            const category = unitCategorySelect.value.toUpperCase(); 
+
+            if (name === "UNNAMED UNIT" && category === "UNKNOWN") {
+                alert("Please enter a Unit ID/Name or select a Category.");
+                return;
+            }
+            
+            const newTracker = new UnitTracker(name, category);
+            activeTrackers.push(newTracker);
+            
+            trackerNameInput.value = ''; 
+            unitCategorySelect.value = 'UNKNOWN';
+            logEntry(`UNIT ACTIVATED: ${name} (${category})`);
+
+            if (!mainTimerInterval) {
+                startMainUpdateLoop();
+            }
+
+            renderTrackers();
+        });
+
+        function deleteUnit(id) {
+            const tracker = activeTrackers.find(t => t.id === id);
+            if (tracker) logEntry(`UNIT PURGED: ${tracker.name}`);
+            
+            activeTrackers = activeTrackers.filter(t => t.id !== id);
+            renderTrackers();
+            
+            if (activeTrackers.length === 0 && !incidentTimer.isRunning) {
+                 stopMainUpdateLoop();
+            }
+        }
+
+        resetButton.addEventListener('click', () => {
+            if (confirm("WARNING: This will purge ALL unit trackers. Continue?")) {
+                activeTrackers = [];
+                if (!incidentTimer.isRunning) {
+                    stopMainUpdateLoop();
+                }
+                renderTrackers();
+                logEntry("GLOBAL WIPE executed on Unit Trackers.");
+            }
+        });
+
+        // Main update loop for ALL running timers (Incident and Units)
+        function updateMainTimers() {
+            const now = Date.now();
+            let needsFullRender = false; 
+            
+            // 1. Update Incident Timer
+            updateIncidentTimer();
+
+            // 2. Update Unit Trackers
+            activeTrackers.forEach(tracker => {
+                if (tracker.isRunning) {
+                    const wasState = tracker.getStatusClass();
+                    
+                    // Update time and reset start time
+                    tracker.getTimeElapsed(now);
+                    
+                    const newState = tracker.getStatusClass();
+                    
+                    // Check for state change
+                    if (wasState !== newState) {
+                        needsFullRender = true;
+                        
+                        // Log the escalation
+                        if (newState === 'warning-status' && wasState === '') {
+                             logEntry(`WARNING: Unit ${tracker.name} elapsed 2 minutes.`);
+                        } else if (newState === 'alert-status' && wasState !== 'alert-status') {
+                             logEntry(`ALERT: Unit ${tracker.name} elapsed 3 minutes (Need CHECK).`);
+                        } else if (newState === 'critical-status' && wasState !== 'critical-status') {
+                             logEntry(`CRITICAL: Unit ${tracker.name} elapsed 5 minutes (IMMEDIATE ACTION).`);
+                        }
+                    }
+                    
+                    // Directly update the time span without a full re-render unless status changed
+                    const timeSpan = trackersList.querySelector(`[data-id="${tracker.id}"] .tracker-time`);
+                    if (timeSpan) {
+                         timeSpan.textContent = tracker.getDisplayTime();
+                    }
+                }
+            });
+            
+            if (needsFullRender) {
+                renderTrackers(); // Only re-render the whole list if a unit status changes
+            }
+        }
+
+        function startMainUpdateLoop() {
+            if (mainTimerInterval) {
+                clearInterval(mainTimerInterval);
+            }
+            mainTimerInterval = setInterval(updateMainTimers, 10);
+        }
+        
+        function stopMainUpdateLoop() {
+             if (mainTimerInterval) {
+                clearInterval(mainTimerInterval);
+                mainTimerInterval = null;
+            }
+        }
+
+        // --- INITIALIZATION ---
+        function initializeApp() {
+            attachUnitActionListeners();
+            renderTrackers(); // Initial render to set up UI
+            
+            // Bind Enter key to unit name input
+            trackerNameInput.addEventListener('keypress', (e) => {
+                 if (e.key === 'Enter') startTrackerButton.click();
+            });
+            
+            logEntry("SYSTEM ONLINE. READY FOR INCIDENT ACTIVATION.");
+        }
+
+        initializeApp(); 
+    </script>
+</body>
+</html>

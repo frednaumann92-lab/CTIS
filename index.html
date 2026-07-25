@@ -535,9 +535,9 @@
         let alertIsActive = false;
         
         // Configurable Escalation Time Constants (in milliseconds)
-        let TIME_WARNING = 120000;  // Default: 2 minutes
-        let TIME_ALERT = 180000;    // Default: 3 minutes
-        let TIME_CRITICAL = 300000; // Default: 5 minutes
+        let TIME_WARNING = 120000;  
+        let TIME_ALERT = 180000;    
+        let TIME_CRITICAL = 300000; 
         const SHIFT_END_HOUR = 6; 
 
         let incidentTimer = {
@@ -549,29 +549,33 @@
         
         let isWallboardMode = false;
 
-        // --- NATIVE WEB AUDIO API SYNTHESIZED BEEP SYSTEM ---
+        // --- ROBUST WEB AUDIO API SYNTHESIZED BEEP SYSTEM ---
         let audioCtx = null;
         let beepInterval = null;
 
         function initAudioContext() {
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume();
+            try {
+                if (!audioCtx) {
+                    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+                }
+                if (audioCtx.state === 'suspended') {
+                    audioCtx.resume();
+                }
+            } catch (e) {
+                console.warn("AudioContext initialization warning:", e);
             }
         }
 
         function playBeep() {
             try {
                 initAudioContext();
-                if (!audioCtx) return;
+                if (!audioCtx || audioCtx.state !== 'running') return;
 
                 const osc = audioCtx.createOscillator();
                 const gainNode = audioCtx.createGain();
 
-                osc.type = 'square'; // Sharp tactical alert tone
-                osc.frequency.setValueAtTime(880, audioCtx.currentTime); // A5 note
+                osc.type = 'square'; 
+                osc.frequency.setValueAtTime(880, audioCtx.currentTime); 
 
                 gainNode.gain.setValueAtTime(0.15, audioCtx.currentTime);
                 gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
@@ -586,15 +590,99 @@
             }
         }
 
-        // Unlock audio context globally on any click/keypress
-        window.addEventListener('click', () => {
-            initAudioContext();
-        }, { once: false });
+        // Global user gesture hooks to keep audio fully unblocked
+        ['click', 'keydown', 'touchstart'].forEach(eventType => {
+            window.addEventListener(eventType, initAudioContext, { once: false, passive: true });
+        });
 
-        window.addEventListener('keydown', () => {
-            initAudioContext();
-        }, { once: false });
+        // --- STATE PERSISTENCE (LOCAL STORAGE) ---
+        function saveState() {
+            try {
+                const stateData = {
+                    activeTrackers: activeTrackers,
+                    logHistory: logHistory,
+                    incidentTimer: incidentTimer,
+                    thresholds: {
+                        warning: TIME_WARNING,
+                        alert: TIME_ALERT,
+                        critical: TIME_CRITICAL
+                    }
+                };
+                localStorage.setItem('ics_system_state', JSON.stringify(stateData));
+            } catch (e) {
+                console.warn("Local storage save failed:", e);
+            }
+        }
 
+        function loadState() {
+            try {
+                const saved = localStorage.getItem('ics_system_state');
+                if (!saved) return false;
+                const data = JSON.parse(saved);
+
+                // Restore Thresholds
+                if (data.thresholds) {
+                    TIME_WARNING = data.thresholds.warning;
+                    TIME_ALERT = data.thresholds.alert;
+                    TIME_CRITICAL = data.thresholds.critical;
+                    inputWarningMin.value = TIME_WARNING / 60000;
+                    inputAlertMin.value = TIME_ALERT / 60000;
+                    inputCriticalMin.value = TIME_CRITICAL / 60000;
+                }
+
+                // Restore Trackers, converting raw objects back to UnitTracker instances
+                if (data.activeTrackers && Array.isArray(data.activeTrackers)) {
+                    const now = Date.now();
+                    activeTrackers = data.activeTrackers.map(t => {
+                        const tracker = Object.assign(new UnitTracker(t.name, t.category), t);
+                        // If it was running, adjust startTime to account for elapsed time offline
+                        if (tracker.isRunning) {
+                            tracker.startTime = now;
+                        }
+                        return tracker;
+                    });
+                }
+
+                // Restore Incident State
+                if (data.incidentTimer) {
+                    incidentTimer = data.incidentTimer;
+                    if (incidentTimer.isRunning) {
+                        incidentTimer.startTime = Date.now();
+                        incidentNameInput.style.display = 'none';
+                        incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
+                        incidentNameDisplay.style.display = 'block';
+                        startIncidentButton.style.display = 'none';
+                        endIncidentButton.style.display = 'block';
+                        logEntryInput.disabled = false;
+                        addLogButton.disabled = false;
+                    }
+                }
+
+                // Restore Logs
+                if (data.logHistory && Array.isArray(data.logHistory)) {
+                    logHistory = data.logHistory;
+                    incidentLogContainer.innerHTML = '';
+                    // Re-render logs in reverse chronological order visually
+                    logHistory.slice().reverse().forEach(logString => {
+                        const match = logString.match(/^\[(.*?)\]\s(.*)$/);
+                        const entry = document.createElement('div');
+                        entry.className = 'log-entry';
+                        if (match) {
+                            entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
+                        } else {
+                            entry.textContent = logString;
+                        }
+                        incidentLogContainer.appendChild(entry);
+                    });
+                    exportLogButton.disabled = logHistory.length === 0;
+                }
+
+                return activeTrackers.length > 0 || incidentTimer.isRunning;
+            } catch (e) {
+                console.warn("Local storage load failed:", e);
+                return false;
+            }
+        }
 
         // --- DYNAMIC THRESHOLD CONTROLS ---
         updateThresholdsBtn.addEventListener('click', () => {
@@ -613,6 +701,7 @@
 
             logEntry(`THRESHOLDS UPDATED: Warning=${warnMin}m, Alert=${alertMin}m, Critical=${critMin}m`);
             renderTrackers();
+            saveState();
         });
 
         // --- CORE UTILITIES ---
@@ -652,7 +741,7 @@
         // --- UNIT CLASS ---
         class UnitTracker {
             constructor(name, category) {
-                this.id = Date.now();
+                this.id = Date.now() + Math.floor(Math.random() * 1000);
                 this.name = name;
                 this.category = category;
                 this.totalTime = 0;
@@ -751,7 +840,7 @@
                 }
                 playBeep();
                 if (!beepInterval) {
-                    beepInterval = setInterval(playBeep, 1200); // Repeat beep every 1.2s during active alerts
+                    beepInterval = setInterval(playBeep, 1200); 
                 }
             } else {
                 clearInterval(alertInterval);
@@ -810,6 +899,7 @@
             
             exportLogButton.disabled = logHistory.length === 0;
             scrollLog();
+            saveState();
         }
 
         startIncidentButton.addEventListener('click', () => {
@@ -833,6 +923,7 @@
                 logEntry(`INCIDENT ACTIVATED: ${name}. TIMER RESTART.`);
 
                 if (!mainTimerInterval) startMainUpdateLoop(); 
+                saveState();
             }
         });
 
@@ -854,6 +945,7 @@
                 if (activeTrackers.length === 0) {
                     stopMainUpdateLoop();
                 }
+                saveState();
             }
         });
 
@@ -929,6 +1021,7 @@
                 }
                 
                 renderTrackers();
+                saveState();
             };
         }
 
@@ -995,6 +1088,7 @@
             }
 
             renderTrackers();
+            saveState();
         });
 
         function deleteUnit(id) {
@@ -1007,6 +1101,7 @@
             if (activeTrackers.length === 0 && !incidentTimer.isRunning) {
                  stopMainUpdateLoop();
             }
+            saveState();
         }
 
         resetButton.addEventListener('click', () => {
@@ -1017,6 +1112,7 @@
                 }
                 renderTrackers();
                 logEntry("GLOBAL WIPE executed on Unit Trackers.");
+                saveState();
             }
         });
 
@@ -1075,13 +1171,22 @@
         // --- INITIALIZATION ---
         function initializeApp() {
             attachUnitActionListeners();
+            
+            const hasRestoredData = loadState();
             renderTrackers(); 
+            
+            if (hasRestoredData && (activeTrackers.length > 0 || incidentTimer.isRunning)) {
+                if (!mainTimerInterval) {
+                    startMainUpdateLoop();
+                }
+                logEntry("SYSTEM SESSION RESTORED FROM LOCAL STORAGE.");
+            } else {
+                logEntry("SYSTEM ONLINE. READY FOR INCIDENT ACTIVATION.");
+            }
             
             trackerNameInput.addEventListener('keypress', (e) => {
                  if (e.key === 'Enter') startTrackerButton.click();
             });
-            
-            logEntry("SYSTEM ONLINE. READY FOR INCIDENT ACTIVATION.");
         }
 
         initializeApp(); 

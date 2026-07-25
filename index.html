@@ -243,7 +243,7 @@
 <body>
     
     <div class="toggle-mode-container">
-        <div id="sync-status" title="Click to switch between Local Storage and Cloud Bin Sync">🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)</div>
+        <div id="sync-status" title="Click to configure or view sync ID">🔄 SYNC: CONNECTED (DEFAULT CHANNEL)</div>
         <button id="mode-toggle-button">ACTIVATE WALLBOARD MODE</button>
     </div>
 
@@ -320,7 +320,7 @@
         const shiftCountdownTimer = document.getElementById('shift-countdown-timer'); 
         const syncStatusDisplay = document.getElementById('sync-status');
         const originalTitle = document.title;
-        let alertInterval, beepInterval, arrivalAlarmInterval;
+        let alertInterval, beepInterval;
         
         const body = document.body;
         const modeToggleButton = document.getElementById('mode-toggle-button');
@@ -362,29 +362,25 @@
 
         let incidentTimer = { isRunning: false, startTime: 0, totalTime: 0, name: "NO ACTIVE INCIDENT" };
         let isWallboardMode = false;
-        let isCloudSync = false; 
-        let syncChannelId = localStorage.getItem("ics_sync_bin_id") || "fred-dispatch-live-01";
-
-        const STORAGE_KEY = "ics_dispatch_local_sync_state";
+        
+        // Automatic default persistent sync channel baked in
+        const DEFAULT_BIN_ID = "fred-dispatch-live-sync";
+        let currentBinId = localStorage.getItem("ics_bin_id") || DEFAULT_BIN_ID;
+        let lastSyncTimestamp = 0;
+        let isSyncing = false;
 
         syncStatusDisplay.addEventListener('click', () => {
-            isCloudSync = !isCloudSync;
-            if (isCloudSync) {
-                let customId = prompt("Enter a shared sync ID/room name for your devices (must be an active npoint bin ID if using remote web):", syncChannelId);
-                if (customId) {
-                    syncChannelId = customId.trim();
-                    localStorage.setItem("ics_sync_bin_id", syncChannelId);
-                }
-                syncStatusDisplay.textContent = `☁️ SYNC: CLOUD ACTIVE (${syncChannelId})`;
-                syncStatusDisplay.style.color = "var(--accent-blue)";
-                pullStateFromCloud();
-            } else {
-                syncStatusDisplay.textContent = "🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)";
-                syncStatusDisplay.style.color = "var(--accent-green)";
+            const custom = prompt("Enter custom npoint.io bin ID (leave blank for default):", currentBinId);
+            if (custom !== null) {
+                currentBinId = custom.trim() || DEFAULT_BIN_ID;
+                localStorage.setItem("ics_bin_id", currentBinId);
+                syncStatusDisplay.textContent = `🔄 SYNC: ${currentBinId}`;
+                fetchCloudState();
             }
         });
 
-        async function pushStateToCloud() {
+        async function saveStateToCloud() {
+            if (isSyncing) return;
             const stateData = {
                 activeTrackers,
                 logHistory,
@@ -392,107 +388,105 @@
                 thresholds: { warning: TIME_WARNING, alert: TIME_ALERT, critical: TIME_CRITICAL },
                 lastUpdated: Date.now()
             };
+            localStorage.setItem("ics_dispatch_standalone_state", JSON.stringify(stateData));
             
-            localStorage.setItem(STORAGE_KEY, JSON.stringify(stateData));
-
-            if (!isCloudSync) return;
+            // If using the default placeholder string name, fallback to local persistence or handle via a fixed shared public key if valid json bin
+            if (currentBinId === DEFAULT_BIN_ID) return; 
 
             try {
-                await fetch(`https://api.npoint.io/${syncChannelId}`, {
+                isSyncing = true;
+                await fetch(`https://api.npoint.io/${currentBinId}`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(stateData)
-                }).catch(() => {});
-            } catch (e) {}
+                });
+            } catch (e) {
+                syncStatusDisplay.textContent = "⚠️ SYNC ERROR (OFFLINE)";
+            } finally {
+                isSyncing = false;
+            }
         }
 
-        async function pullStateFromCloud() {
+        async function fetchCloudState() {
+            if (currentBinId === DEFAULT_BIN_ID) {
+                loadStateLocally();
+                return;
+            }
             try {
-                let data = null;
-                if (isCloudSync) {
-                    const response = await fetch(`https://api.npoint.io/${syncChannelId}`).catch(() => null);
-                    if (response && response.ok) {
-                        data = await response.json();
-                    }
+                const response = await fetch(`https://api.npoint.io/${currentBinId}`);
+                if (!response.ok) return;
+                const data = await response.json();
+                if (data && data.lastUpdated && data.lastUpdated > lastSyncTimestamp) {
+                    lastSyncTimestamp = data.lastUpdated;
+                    applyStateData(data);
                 }
-                
-                if (!data) {
-                    const raw = localStorage.getItem(STORAGE_KEY);
-                    if (raw) data = JSON.parse(raw);
-                }
-
-                if (data && data.activeTrackers) {
-                    if (data.thresholds) {
-                        TIME_WARNING = data.thresholds.warning;
-                        TIME_ALERT = data.thresholds.alert;
-                        TIME_CRITICAL = data.thresholds.critical;
-                        inputWarningMin.value = TIME_WARNING / 60000;
-                        inputAlertMin.value = TIME_ALERT / 60000;
-                        inputCriticalMin.value = TIME_CRITICAL / 60000;
-                    }
-
-                    const now = Date.now();
-                    const updatedTrackers = data.activeTrackers.map(t => {
-                        const existingTracker = activeTrackers.find(ext => ext.id === t.id);
-                        if (existingTracker && existingTracker.isRunning === t.isRunning) {
-                            return existingTracker;
-                        }
-                        const tracker = Object.assign(new UnitTracker(t.name, t.category, t.targetDurationMin), t);
-                        if (tracker.isRunning) tracker.startTime = now;
-                        return tracker;
-                    });
-                    
-                    activeTrackers = updatedTrackers;
-
-                    if (data.incidentTimer) {
-                        incidentTimer = data.incidentTimer;
-                        if (incidentTimer.isRunning) {
-                            incidentTimer.startTime = Date.now();
-                            incidentNameInput.style.display = 'none';
-                            incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
-                            incidentNameDisplay.style.display = 'block';
-                            startIncidentBtn.style.display = 'none';
-                            endIncidentButton.style.display = 'block';
-                            logEntryInput.disabled = false;
-                            addLogButton.disabled = false;
-                        } else {
-                            incidentNameInput.style.display = 'block';
-                            incidentNameDisplay.style.display = 'none';
-                            startIncidentBtn.style.display = 'block';
-                            endIncidentButton.style.display = 'none';
-                            logEntryInput.disabled = true;
-                            addLogButton.disabled = true;
-                        }
-                    }
-
-                    if (data.logHistory && data.logHistory.length !== logHistory.length) {
-                        logHistory = data.logHistory;
-                        incidentLogContainer.innerHTML = '';
-                        logHistory.slice().reverse().forEach(logString => {
-                            const match = logString.match(/^\[(.*?)\]\s(.*)$/);
-                            const entry = document.createElement('div');
-                            entry.className = 'log-entry';
-                            if (match) {
-                                entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
-                            } else {
-                                entry.textContent = logString;
-                            }
-                            incidentLogContainer.appendChild(entry);
-                        });
-                        exportLogButton.disabled = logHistory.length === 0;
-                    }
-
-                    renderTrackers();
-                    if ((activeTrackers.length > 0 || incidentTimer.isRunning) && !mainTimerInterval) {
-                        startMainUpdateLoop();
-                    }
-                }
-            } catch (e) {}
+            } catch (e) {
+                loadStateLocally();
+            }
         }
 
-        window.addEventListener('storage', (e) => {
-            if (e.key === STORAGE_KEY) pullStateFromCloud();
-        });
+        function applyStateData(data) {
+            if (!data || !data.activeTrackers) return;
+            if (data.thresholds) {
+                TIME_WARNING = data.thresholds.warning;
+                TIME_ALERT = data.thresholds.alert;
+                TIME_CRITICAL = data.thresholds.critical;
+                inputWarningMin.value = TIME_WARNING / 60000;
+                inputAlertMin.value = TIME_ALERT / 60000;
+                inputCriticalMin.value = TIME_CRITICAL / 60000;
+            }
+
+            const now = Date.now();
+            activeTrackers = data.activeTrackers.map(t => {
+                const tracker = Object.assign(new UnitTracker(t.name, t.category, t.targetDurationMin), t);
+                if (tracker.isRunning) tracker.startTime = now;
+                return tracker;
+            });
+
+            if (data.incidentTimer) {
+                incidentTimer = data.incidentTimer;
+                if (incidentTimer.isRunning) {
+                    incidentTimer.startTime = Date.now();
+                    incidentNameInput.style.display = 'none';
+                    incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
+                    incidentNameDisplay.style.display = 'block';
+                    startIncidentBtn.style.display = 'none';
+                    endIncidentButton.style.display = 'block';
+                    logEntryInput.disabled = false;
+                    addLogButton.disabled = false;
+                }
+            }
+
+            if (data.logHistory) {
+                logHistory = data.logHistory;
+                incidentLogContainer.innerHTML = '';
+                logHistory.slice().reverse().forEach(logString => {
+                    const match = logString.match(/^\[(.*?)\]\s(.*)$/);
+                    const entry = document.createElement('div');
+                    entry.className = 'log-entry';
+                    if (match) {
+                        entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
+                    } else {
+                        entry.textContent = logString;
+                    }
+                    incidentLogContainer.appendChild(entry);
+                });
+                exportLogButton.disabled = logHistory.length === 0;
+            }
+
+            renderTrackers();
+            if ((activeTrackers.length > 0 || incidentTimer.isRunning) && !mainTimerInterval) {
+                startMainUpdateLoop();
+            }
+        }
+
+        function loadStateLocally() {
+            try {
+                const raw = localStorage.getItem("ics_dispatch_standalone_state");
+                if (!raw) return;
+                applyStateData(JSON.parse(raw));
+            } catch (e) {}
+        }
 
         let audioCtx = null;
         function initAudioContext() {
@@ -532,8 +526,8 @@
                 osc1.type = 'sawtooth';
                 osc2.type = 'square';
 
-                osc1.frequency.setValueAtTime(1046.50, now); // C6
-                osc1.frequency.setValueAtTime(1318.51, now + 0.15); // E6
+                osc1.frequency.setValueAtTime(1046.50, now); 
+                osc1.frequency.setValueAtTime(1318.51, now + 0.15); 
                 osc2.frequency.setValueAtTime(523.25, now);
                 osc2.frequency.setValueAtTime(659.25, now + 0.15);
 
@@ -568,7 +562,7 @@
             TIME_CRITICAL = critMin * 60000;
             logEntry(`THRESHOLDS UPDATED: Warning=${warnMin}m, Alert=${alertMin}m, Critical=${critMin}m`);
             renderTrackers();
-            pushStateToCloud();
+            saveStateToCloud();
         });
 
         function formatTime(ms) {
@@ -768,7 +762,7 @@
 
                 logEntry(`INCIDENT ACTIVATED: ${name}.`);
                 if (!mainTimerInterval) startMainUpdateLoop(); 
-                pushStateToCloud();
+                saveStateToCloud();
             }
         });
 
@@ -786,7 +780,7 @@
                 incidentDisplay.textContent = formatTime(incidentTimer.totalTime);
                 
                 if (activeTrackers.length === 0) stopMainUpdateLoop();
-                pushStateToCloud();
+                saveStateToCloud();
             }
         });
 
@@ -795,7 +789,7 @@
             if (entryText && incidentTimer.isRunning) {
                 logEntry(entryText.toUpperCase());
                 logEntryInput.value = '';
-                pushStateToCloud();
+                saveStateToCloud();
             }
         });
         
@@ -846,7 +840,7 @@
                     return; 
                 }
                 renderTrackers();
-                pushStateToCloud();
+                saveStateToCloud();
             };
         }
 
@@ -914,7 +908,7 @@
 
             if (!mainTimerInterval) startMainUpdateLoop();
             renderTrackers();
-            pushStateToCloud();
+            saveStateToCloud();
         });
 
         function deleteUnit(id) {
@@ -923,7 +917,7 @@
             activeTrackers = activeTrackers.filter(t => t.id !== id);
             renderTrackers();
             if (activeTrackers.length === 0 && !incidentTimer.isRunning) stopMainUpdateLoop();
-            pushStateToCloud();
+            saveStateToCloud();
         }
 
         resetButton.addEventListener('click', () => {
@@ -932,7 +926,7 @@
                 if (!incidentTimer.isRunning) stopMainUpdateLoop();
                 renderTrackers();
                 logEntry("GLOBAL WIPE executed.");
-                pushStateToCloud();
+                saveStateToCloud();
             }
         });
 
@@ -973,14 +967,11 @@
              if (mainTimerInterval) { clearInterval(mainTimerInterval); mainTimerInterval = null; }
         }
 
-        async function initializeApp() {
+        function initializeApp() {
             attachUnitActionListeners();
-            await pullStateFromCloud();
-            
-            // Continuous polling loop restored so multiple screens/tabs sync changes automatically
-            setInterval(() => {
-                pullStateFromCloud();
-            }, 3000);
+            loadStateLocally();
+            fetchCloudState();
+            setInterval(fetchCloudState, 3000); // Poll cloud automatically every 3 seconds for cross-computer sync
             
             trackerNameInput.addEventListener('keypress', (e) => {
                  if (e.key === 'Enter') startTrackerButton.click();

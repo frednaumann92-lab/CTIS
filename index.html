@@ -140,6 +140,7 @@
             padding: 6px 12px;
             border-radius: 3px;
             border: 1px solid #333;
+            cursor: pointer;
         }
 
         #status-summary {
@@ -233,7 +234,7 @@
 <body>
     
     <div class="toggle-mode-container">
-        <div id="sync-status">🔄 SYNC: READY (LOCAL/SESSION MODE)</div>
+        <div id="sync-status" title="Click to switch between Local Storage and Cloud Bin Sync">🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)</div>
         <button id="mode-toggle-button">ACTIVATE WALLBOARD MODE</button>
     </div>
 
@@ -316,7 +317,8 @@
         const incidentDisplay = document.getElementById('incident-display');
         const incidentNameInput = document.getElementById('incident-name-input');
         const incidentNameDisplay = document.getElementById('incident-name-display');
-        const startIncidentButton = document.getElementById('start-incident');
+        const startIncidentButton = document.jsdelivr ? null : document.getElementById('start-incident'); // standard ref below
+        const startIncidentBtn = document.getElementById('start-incident');
         const endIncidentButton = document.getElementById('end-incident');
         const logEntryInput = document.getElementById('log-entry-input');
         const addLogButton = document.getElementById('add-log');
@@ -350,33 +352,69 @@
 
         let incidentTimer = { isRunning: false, startTime: 0, totalTime: 0, name: "NO ACTIVE INCIDENT" };
         let isWallboardMode = false;
+        let isCloudSync = false; // Toggle between local storage and public CORS-safe bin
+        let syncChannelId = localStorage.getItem("ics_sync_bin_id") || "fred-dispatch-live-01";
 
-        // Utilizing safe browser local storage synchronization channel
+        // Using Npoint.io free CORS JSON bin service for cross-computer state sharing
         const STORAGE_KEY = "ics_dispatch_local_sync_state";
 
-        function pushStateToCloud() {
-            try {
-                const stateData = {
-                    activeTrackers,
-                    logHistory,
-                    incidentTimer,
-                    thresholds: { warning: TIME_WARNING, alert: TIME_ALERT, critical: TIME_CRITICAL },
-                    lastUpdated: Date.now()
-                };
-                localStorage.setItem(STORAGE_KEY, JSON.stringify(stateData));
-                syncStatusDisplay.textContent = "🔄 SYNC: ACTIVE (LOCAL STORAGE)";
+        syncStatusDisplay.addEventListener('click', () => {
+            isCloudSync = !isCloudSync;
+            if (isCloudSync) {
+                let customId = prompt("Enter a shared sync ID/room name for your devices:", syncChannelId);
+                if (customId) {
+                    syncChannelId = customId.trim();
+                    localStorage.setItem("ics_sync_bin_id", syncChannelId);
+                }
+                syncStatusDisplay.textContent = `☁️ SYNC: CLOUD ACTIVE (${syncChannelId})`;
+                syncStatusDisplay.style.color = "var(--accent-blue)";
+                pullStateFromCloud();
+            } else {
+                syncStatusDisplay.textContent = "🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)";
                 syncStatusDisplay.style.color = "var(--accent-green)";
-            } catch (e) {
-                syncStatusDisplay.textContent = "❌ SYNC: STORAGE BLOCKED";
             }
+        });
+
+        async function pushStateToCloud() {
+            const stateData = {
+                activeTrackers,
+                logHistory,
+                incidentTimer,
+                thresholds: { warning: TIME_WARNING, alert: TIME_ALERT, critical: TIME_CRITICAL },
+                lastUpdated: Date.now()
+            };
+            
+            // Always save locally first
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(stateData));
+
+            if (!isCloudSync) return;
+
+            try {
+                // Using a public cross-origin echo or bin service if cloud mode is selected
+                // For true cross-device persistence without dedicated backend, we push via standard fetch if endpoint allows
+                await fetch(`https://api.npoint.io/${syncChannelId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(stateData)
+                }).catch(() => {});
+            } catch (e) {}
         }
 
-        function pullStateFromCloud() {
+        async function pullStateFromCloud() {
             try {
-                const raw = localStorage.getItem(STORAGE_KEY);
-                if (!raw) return;
-                const data = JSON.parse(raw);
+                let data = null;
+                if (isCloudSync) {
+                    const response = await fetch(`https://api.npoint.io/${syncChannelId}`).catch(() => null);
+                    if (response && response.ok) {
+                        data = await response.json();
+                    }
+                }
                 
+                if (!data) {
+                    const raw = localStorage.getItem(STORAGE_KEY);
+                    if (raw) data = JSON.parse(raw);
+                }
+
                 if (data && data.activeTrackers) {
                     if (data.thresholds) {
                         TIME_WARNING = data.thresholds.warning;
@@ -401,14 +439,14 @@
                             incidentNameInput.style.display = 'none';
                             incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
                             incidentNameDisplay.style.display = 'block';
-                            startIncidentButton.style.display = 'none';
+                            startIncidentBtn.style.display = 'none';
                             endIncidentButton.style.display = 'block';
                             logEntryInput.disabled = false;
                             addLogButton.disabled = false;
                         } else {
                             incidentNameInput.style.display = 'block';
                             incidentNameDisplay.style.display = 'none';
-                            startIncidentButton.style.display = 'block';
+                            startIncidentBtn.style.display = 'block';
                             endIncidentButton.style.display = 'none';
                             logEntryInput.disabled = true;
                             addLogButton.disabled = true;
@@ -441,7 +479,7 @@
         }
 
         window.addEventListener('storage', (e) => {
-            if (e.key === STORAGE_KEY) pullStateFromCloud();
+            if (e.key === STORAGE_KEY && !isCloudSync) pullStateFromCloud();
         });
 
         let audioCtx = null;
@@ -629,7 +667,7 @@
             scrollLog();
         }
 
-        startIncidentButton.addEventListener('click', () => {
+        startIncidentBtn.addEventListener('click', () => {
             if (!incidentTimer.isRunning) {
                 const name = incidentNameInput.value.trim().toUpperCase() || "UNNAMED INCIDENT";
                 incidentTimer.isRunning = true;
@@ -640,7 +678,7 @@
                 incidentNameInput.style.display = 'none';
                 incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${name}`;
                 incidentNameDisplay.style.display = 'block';
-                startIncidentButton.style.display = 'none';
+                startIncidentBtn.style.display = 'none';
                 endIncidentButton.style.display = 'block';
                 logEntryInput.disabled = false;
                 addLogButton.disabled = false;
@@ -658,7 +696,7 @@
                 
                 incidentNameInput.style.display = 'block';
                 incidentNameDisplay.style.display = 'none';
-                startIncidentButton.style.display = 'block';
+                startIncidentBtn.style.display = 'block';
                 endIncidentButton.style.display = 'none';
                 logEntryInput.disabled = true;
                 addLogButton.disabled = true;
@@ -827,7 +865,9 @@
 
         async function initializeApp() {
             attachUnitActionListeners();
-            pullStateFromCloud();
+            await pullStateFromCloud();
+            // Poll every 3 seconds for cross-device sync updates
+            setInterval(pullStateFromCloud, 3000);
             trackerNameInput.addEventListener('keypress', (e) => {
                  if (e.key === 'Enter') startTrackerButton.click();
             });

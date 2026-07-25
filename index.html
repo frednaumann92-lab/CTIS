@@ -243,7 +243,7 @@
 <body>
     
     <div class="toggle-mode-container">
-        <div id="sync-status" title="Click to switch between Local Storage and Broadcast Sync">🔄 SYNC: LOCAL TAB MODE (CLICK TO TOGGLE MULTI-TAB)</div>
+        <div id="sync-status" title="Click to switch between Local Storage and Cloud Bin Sync">🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)</div>
         <button id="mode-toggle-button">ACTIVATE WALLBOARD MODE</button>
     </div>
 
@@ -362,24 +362,29 @@
 
         let incidentTimer = { isRunning: false, startTime: 0, totalTime: 0, name: "NO ACTIVE INCIDENT" };
         let isWallboardMode = false;
-        let isBroadcastSync = false; 
+        let isCloudSync = false; 
+        let syncChannelId = localStorage.getItem("ics_sync_bin_id") || "fred-dispatch-live-01";
 
         const STORAGE_KEY = "ics_dispatch_local_sync_state";
-        const broadcastChannel = new BroadcastChannel('ics_dispatch_sync_channel');
 
         syncStatusDisplay.addEventListener('click', () => {
-            isBroadcastSync = !isBroadcastSync;
-            if (isBroadcastSync) {
-                syncStatusDisplay.textContent = `📡 SYNC: MULTI-TAB ACTIVE (BROADCAST)`;
+            isCloudSync = !isCloudSync;
+            if (isCloudSync) {
+                let customId = prompt("Enter a shared sync ID/room name for your devices (must be an active npoint bin ID if using remote web):", syncChannelId);
+                if (customId) {
+                    syncChannelId = customId.trim();
+                    localStorage.setItem("ics_sync_bin_id", syncChannelId);
+                }
+                syncStatusDisplay.textContent = `☁️ SYNC: CLOUD ACTIVE (${syncChannelId})`;
                 syncStatusDisplay.style.color = "var(--accent-blue)";
-                pullStateFromStorage();
+                pullStateFromCloud();
             } else {
-                syncStatusDisplay.textContent = "🔄 SYNC: LOCAL TAB MODE (CLICK TO TOGGLE MULTI-TAB)";
+                syncStatusDisplay.textContent = "🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)";
                 syncStatusDisplay.style.color = "var(--accent-green)";
             }
         });
 
-        function pushStateToStorage() {
+        async function pushStateToCloud() {
             const stateData = {
                 activeTrackers,
                 logHistory,
@@ -389,97 +394,104 @@
             };
             
             localStorage.setItem(STORAGE_KEY, JSON.stringify(stateData));
-            if (isBroadcastSync) {
-                broadcastChannel.postMessage(stateData);
-            }
+
+            if (!isCloudSync) return;
+
+            try {
+                await fetch(`https://api.npoint.io/${syncChannelId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(stateData)
+                }).catch(() => {});
+            } catch (e) {}
         }
 
-        broadcastChannel.onmessage = (event) => {
-            if (isBroadcastSync && event.data) {
-                applyStateData(event.data);
-            }
-        };
-
-        function applyStateData(data) {
-            if (!data || !data.activeTrackers) return;
-
-            if (data.thresholds) {
-                TIME_WARNING = data.thresholds.warning;
-                TIME_ALERT = data.thresholds.alert;
-                TIME_CRITICAL = data.thresholds.critical;
-                inputWarningMin.value = TIME_WARNING / 60000;
-                inputAlertMin.value = TIME_ALERT / 60000;
-                inputCriticalMin.value = TIME_CRITICAL / 60000;
-            }
-
-            const now = Date.now();
-            const updatedTrackers = data.activeTrackers.map(t => {
-                const existingTracker = activeTrackers.find(ext => ext.id === t.id);
-                if (existingTracker && existingTracker.isRunning === t.isRunning) {
-                    return existingTracker;
-                }
-                const tracker = Object.assign(new UnitTracker(t.name, t.category, t.targetDurationMin), t);
-                if (tracker.isRunning) tracker.startTime = now;
-                return tracker;
-            });
-            
-            activeTrackers = updatedTrackers;
-
-            if (data.incidentTimer) {
-                incidentTimer = data.incidentTimer;
-                if (incidentTimer.isRunning) {
-                    incidentTimer.startTime = Date.now();
-                    incidentNameInput.style.display = 'none';
-                    incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
-                    incidentNameDisplay.style.display = 'block';
-                    startIncidentBtn.style.display = 'none';
-                    endIncidentButton.style.display = 'block';
-                    logEntryInput.disabled = false;
-                    addLogButton.disabled = false;
-                } else {
-                    incidentNameInput.style.display = 'block';
-                    incidentNameDisplay.style.display = 'none';
-                    startIncidentBtn.style.display = 'block';
-                    endIncidentButton.style.display = 'none';
-                    logEntryInput.disabled = true;
-                    addLogButton.disabled = true;
-                }
-            }
-
-            if (data.logHistory && data.logHistory.length !== logHistory.length) {
-                logHistory = data.logHistory;
-                incidentLogContainer.innerHTML = '';
-                logHistory.slice().reverse().forEach(logString => {
-                    const match = logString.match(/^\[(.*?)\]\s(.*)$/);
-                    const entry = document.createElement('div');
-                    entry.className = 'log-entry';
-                    if (match) {
-                        entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
-                    } else {
-                        entry.textContent = logString;
+        async function pullStateFromCloud() {
+            try {
+                let data = null;
+                if (isCloudSync) {
+                    const response = await fetch(`https://api.npoint.io/${syncChannelId}`).catch(() => null);
+                    if (response && response.ok) {
+                        data = await response.json();
                     }
-                    incidentLogContainer.appendChild(entry);
-                });
-                exportLogButton.disabled = logHistory.length === 0;
-            }
+                }
+                
+                if (!data) {
+                    const raw = localStorage.getItem(STORAGE_KEY);
+                    if (raw) data = JSON.parse(raw);
+                }
 
-            renderTrackers();
-            if ((activeTrackers.length > 0 || incidentTimer.isRunning) && !mainTimerInterval) {
-                startMainUpdateLoop();
-            }
-        }
+                if (data && data.activeTrackers) {
+                    if (data.thresholds) {
+                        TIME_WARNING = data.thresholds.warning;
+                        TIME_ALERT = data.thresholds.alert;
+                        TIME_CRITICAL = data.thresholds.critical;
+                        inputWarningMin.value = TIME_WARNING / 60000;
+                        inputAlertMin.value = TIME_ALERT / 60000;
+                        inputCriticalMin.value = TIME_CRITICAL / 60000;
+                    }
 
-        function pullStateFromStorage() {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (raw) {
-                try {
-                    applyStateData(JSON.parse(raw));
-                } catch (e) {}
-            }
+                    const now = Date.now();
+                    const updatedTrackers = data.activeTrackers.map(t => {
+                        const existingTracker = activeTrackers.find(ext => ext.id === t.id);
+                        if (existingTracker && existingTracker.isRunning === t.isRunning) {
+                            return existingTracker;
+                        }
+                        const tracker = Object.assign(new UnitTracker(t.name, t.category, t.targetDurationMin), t);
+                        if (tracker.isRunning) tracker.startTime = now;
+                        return tracker;
+                    });
+                    
+                    activeTrackers = updatedTrackers;
+
+                    if (data.incidentTimer) {
+                        incidentTimer = data.incidentTimer;
+                        if (incidentTimer.isRunning) {
+                            incidentTimer.startTime = Date.now();
+                            incidentNameInput.style.display = 'none';
+                            incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
+                            incidentNameDisplay.style.display = 'block';
+                            startIncidentBtn.style.display = 'none';
+                            endIncidentButton.style.display = 'block';
+                            logEntryInput.disabled = false;
+                            addLogButton.disabled = false;
+                        } else {
+                            incidentNameInput.style.display = 'block';
+                            incidentNameDisplay.style.display = 'none';
+                            startIncidentBtn.style.display = 'block';
+                            endIncidentButton.style.display = 'none';
+                            logEntryInput.disabled = true;
+                            addLogButton.disabled = true;
+                        }
+                    }
+
+                    if (data.logHistory && data.logHistory.length !== logHistory.length) {
+                        logHistory = data.logHistory;
+                        incidentLogContainer.innerHTML = '';
+                        logHistory.slice().reverse().forEach(logString => {
+                            const match = logString.match(/^\[(.*?)\]\s(.*)$/);
+                            const entry = document.createElement('div');
+                            entry.className = 'log-entry';
+                            if (match) {
+                                entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
+                            } else {
+                                entry.textContent = logString;
+                            }
+                            incidentLogContainer.appendChild(entry);
+                        });
+                        exportLogButton.disabled = logHistory.length === 0;
+                    }
+
+                    renderTrackers();
+                    if ((activeTrackers.length > 0 || incidentTimer.isRunning) && !mainTimerInterval) {
+                        startMainUpdateLoop();
+                    }
+                }
+            } catch (e) {}
         }
 
         window.addEventListener('storage', (e) => {
-            if (e.key === STORAGE_KEY) pullStateFromStorage();
+            if (e.key === STORAGE_KEY) pullStateFromCloud();
         });
 
         let audioCtx = null;
@@ -556,7 +568,7 @@
             TIME_CRITICAL = critMin * 60000;
             logEntry(`THRESHOLDS UPDATED: Warning=${warnMin}m, Alert=${alertMin}m, Critical=${critMin}m`);
             renderTrackers();
-            pushStateToStorage();
+            pushStateToCloud();
         });
 
         function formatTime(ms) {
@@ -756,7 +768,7 @@
 
                 logEntry(`INCIDENT ACTIVATED: ${name}.`);
                 if (!mainTimerInterval) startMainUpdateLoop(); 
-                pushStateToStorage();
+                pushStateToCloud();
             }
         });
 
@@ -774,7 +786,7 @@
                 incidentDisplay.textContent = formatTime(incidentTimer.totalTime);
                 
                 if (activeTrackers.length === 0) stopMainUpdateLoop();
-                pushStateToStorage();
+                pushStateToCloud();
             }
         });
 
@@ -783,7 +795,7 @@
             if (entryText && incidentTimer.isRunning) {
                 logEntry(entryText.toUpperCase());
                 logEntryInput.value = '';
-                pushStateToStorage();
+                pushStateToCloud();
             }
         });
         
@@ -834,7 +846,7 @@
                     return; 
                 }
                 renderTrackers();
-                pushStateToStorage();
+                pushStateToCloud();
             };
         }
 
@@ -902,7 +914,7 @@
 
             if (!mainTimerInterval) startMainUpdateLoop();
             renderTrackers();
-            pushStateToStorage();
+            pushStateToCloud();
         });
 
         function deleteUnit(id) {
@@ -911,7 +923,7 @@
             activeTrackers = activeTrackers.filter(t => t.id !== id);
             renderTrackers();
             if (activeTrackers.length === 0 && !incidentTimer.isRunning) stopMainUpdateLoop();
-            pushStateToStorage();
+            pushStateToCloud();
         }
 
         resetButton.addEventListener('click', () => {
@@ -920,7 +932,7 @@
                 if (!incidentTimer.isRunning) stopMainUpdateLoop();
                 renderTrackers();
                 logEntry("GLOBAL WIPE executed.");
-                pushStateToStorage();
+                pushStateToCloud();
             }
         });
 
@@ -963,7 +975,12 @@
 
         async function initializeApp() {
             attachUnitActionListeners();
-            pullStateFromStorage();
+            await pullStateFromCloud();
+            
+            // Continuous polling loop restored so multiple screens/tabs sync changes automatically
+            setInterval(() => {
+                pullStateFromCloud();
+            }, 3000);
             
             trackerNameInput.addEventListener('keypress', (e) => {
                  if (e.key === 'Enter') startTrackerButton.click();

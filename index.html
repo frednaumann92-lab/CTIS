@@ -233,7 +233,7 @@
 <body>
     
     <div class="toggle-mode-container">
-        <div id="sync-status">🔄 SYNC: CONNECTING...</div>
+        <div id="sync-status">🔄 SYNC: READY (LOCAL/SESSION MODE)</div>
         <button id="mode-toggle-button">ACTIVATE WALLBOARD MODE</button>
     </div>
 
@@ -350,14 +350,11 @@
 
         let incidentTimer = { isRunning: false, startTime: 0, totalTime: 0, name: "NO ACTIVE INCIDENT" };
         let isWallboardMode = false;
-        let isSyncing = false;
 
-        // Using a reliable public bin fallback route (JSONBin / Local storage pairing)
+        // Utilizing safe browser local storage synchronization channel
         const STORAGE_KEY = "ics_dispatch_local_sync_state";
 
-        async function pushStateToCloud() {
-            if (isSyncing) return;
-            isSyncing = true;
+        function pushStateToCloud() {
             try {
                 const stateData = {
                     activeTrackers,
@@ -367,16 +364,14 @@
                     lastUpdated: Date.now()
                 };
                 localStorage.setItem(STORAGE_KEY, JSON.stringify(stateData));
-                syncStatusDisplay.textContent = "🔄 SYNC: LOCAL ACTIVE (MULTI-WINDOW)";
+                syncStatusDisplay.textContent = "🔄 SYNC: ACTIVE (LOCAL STORAGE)";
                 syncStatusDisplay.style.color = "var(--accent-green)";
             } catch (e) {
-                syncStatusDisplay.textContent = "❌ SYNC: ERROR";
-            } finally {
-                isSyncing = false;
+                syncStatusDisplay.textContent = "❌ SYNC: STORAGE BLOCKED";
             }
         }
 
-        async function pullStateFromCloud() {
+        function pullStateFromCloud() {
             try {
                 const raw = localStorage.getItem(STORAGE_KEY);
                 if (!raw) return;
@@ -832,8 +827,7 @@
 
         async function initializeApp() {
             attachUnitActionListeners();
-            await pullStateFromCloud();
-            setInterval(pullStateFromCloud, 2000);
+            pullStateFromCloud();
             trackerNameInput.addEventListener('keypress', (e) => {
                  if (e.key === 'Enter') startTrackerButton.click();
             });

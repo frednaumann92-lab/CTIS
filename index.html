@@ -4,8 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Incident Command & Unit Status Tracker</title>
-    <!-- MQTT WebSocket CDN for zero-permission real-time sync -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
     <style>
         :root {
             --bg-dark: #111;
@@ -137,13 +135,12 @@
         
         #sync-status {
             font-size: 0.85em;
-            color: var(--warning-yellow);
+            color: var(--accent-green);
             background: #1a1a1a;
             padding: 6px 12px;
             border-radius: 3px;
             border: 1px solid #333;
             cursor: pointer;
-            user-select: none;
         }
 
         #status-summary {
@@ -185,11 +182,12 @@
         body.wallboard-mode #incident-name-input,
         body.wallboard-mode #unit-category-select,
         body.wallboard-mode #tracker-name-input,
+        body.wallboard-mode #tracker-eta-input,
         body.wallboard-mode .tracker-actions {
             display: none !important;
         }
         
-        input[type="text"], select {
+        input[type="text"], input[type="number"], select {
             padding: 10px; border: 1px solid #555; border-radius: 3px; background-color: #3a3a3a; color: var(--text-white); font-family: 'Consolas', monospace; flex-grow: 1;
         }
         select { flex-grow: 0.5; min-width: 100px; }
@@ -215,6 +213,7 @@
         
         .tracker-info { display: flex; flex-direction: column; }
         .tracker-category { font-size: 0.8em; color: #ccc; text-transform: uppercase; }
+        .tracker-mode-tag { font-size: 0.75em; color: var(--accent-blue); font-weight: bold; margin-top: 3px; }
 
         .tracker-item.warning-status { background-color: #4a4a3a; }
         .tracker-item.alert-status { background-color: var(--alert-red); border-left: 5px solid var(--text-white) !important; box-shadow: 0 0 10px rgba(220, 53, 69, 0.8); }
@@ -223,12 +222,19 @@
             50% { background-color: var(--alert-red); }
             100% { background-color: var(--critical-dark-red); }
         }
+        @keyframes flash-gold {
+            0% { background-color: #856404; }
+            50% { background-color: var(--alert-red); }
+            100% { background-color: #856404; }
+        }
         .tracker-item.critical-status { animation: pulse 1s infinite alternate; border-left: 5px solid var(--warning-yellow) !important; box-shadow: 0 0 15px var(--alert-red); }
+        .tracker-item.arrival-alarm { animation: flash-gold 0.8s infinite alternate; border-left: 5px solid var(--warning-yellow) !important; box-shadow: 0 0 20px var(--warning-yellow); }
 
         .tracker-name { font-weight: bold; font-size: 1.2em; color: var(--text-white); text-transform: capitalize; }
-        .tracker-time { font-size: 1.6em; color: var(--text-white); text-shadow: 0 0 3px rgba(255, 255, 255, 0.5); }
+        .tracker-time { font-size: 1.6em; color: var(--text-white); text-shadow: 0 0 3px rgba(255, 255, 255, 0.5); font-variant-numeric: tabular-nums; }
         
         .check-btn { background-color: var(--text-white); color: var(--bg-dark); font-weight: bolder; }
+        .arrived-btn { background-color: var(--warning-yellow); color: var(--bg-dark); font-weight: bolder; border: none; padding: 8px 12px; border-radius: 3px; cursor: pointer; }
         .stop-bin, .stop-btn { background-color: var(--alert-red); color: white; }
         .resume-btn { background-color: var(--accent-green); color: var(--bg-dark); }
         .delete-btn { background-color: #6c757d; color: white; }
@@ -237,7 +243,7 @@
 <body>
     
     <div class="toggle-mode-container">
-        <div id="sync-status" title="Click to change your Sync Room ID">⚡ SYNC: CONNECTING...</div>
+        <div id="sync-status" title="Click to switch between Local Storage and Cloud Bin Sync">🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)</div>
         <button id="mode-toggle-button">ACTIVATE WALLBOARD MODE</button>
     </div>
 
@@ -292,13 +298,14 @@
 
             <div class="tracker-controls">
                 <select id="unit-category-select">
-                    <option value="UNKNOWN">-- SELECT CATEGORY --</option>
+                    <option value="UNKNOWN">-- CATEGORY --</option>
                     <option value="MED">MED (Medical)</option>
                     <option value="FIRE">FIRE (Fire/Rescue)</option>
                     <option value="PD">PD (Police)</option>
-                    <option value="SUPPORT">SUPPORT (Logistics/Other)</option>
+                    <option value="SUPPORT">SUPPORT (Logistics)</option>
                 </select>
-                <input type="text" id="tracker-name-input" placeholder="ENTER UNIT ID / NAME">
+                <input type="text" id="tracker-name-input" placeholder="UNIT ID / NAME">
+                <input type="number" id="tracker-eta-input" placeholder="ETA MIN (OPTIONAL)" min="0.1" step="0.5" style="width: 140px; flex-grow: 0;">
                 <button id="start-tracker">➕ ACTIVATE UNIT</button>
                 <button id="reset-tracker">GLOBAL WIPE</button>
             </div>
@@ -313,7 +320,7 @@
         const shiftCountdownTimer = document.getElementById('shift-countdown-timer'); 
         const syncStatusDisplay = document.getElementById('sync-status');
         const originalTitle = document.title;
-        let alertInterval, beepInterval;
+        let alertInterval, beepInterval, arrivalAlarmInterval;
         
         const body = document.body;
         const modeToggleButton = document.getElementById('mode-toggle-button');
@@ -329,6 +336,7 @@
         
         const trackersList = document.getElementById('trackers-list');
         const trackerNameInput = document.getElementById('tracker-name-input');
+        const trackerEtaInput = document.getElementById('tracker-eta-input');
         const startTrackerButton = document.getElementById('start-tracker');
         const resetButton = document.getElementById('reset-tracker');
         const unitCategorySelect = document.getElementById('unit-category-select'); 
@@ -354,62 +362,30 @@
 
         let incidentTimer = { isRunning: false, startTime: 0, totalTime: 0, name: "NO ACTIVE INCIDENT" };
         let isWallboardMode = false;
-        
-        // WebSocket Sync Initialization
-        const myDeviceId = 'dev_' + Math.random().toString(36).substr(2, 9);
-        let syncChannelId = localStorage.getItem("ics_sync_room_id") || "dispatch-channel-01";
-        let mqttClient = null;
-        let isReceivingRemoteState = false;
-        const LOCAL_STORAGE_KEY = "ics_dispatch_local_sync_state";
+        let isCloudSync = false; 
+        let syncChannelId = localStorage.getItem("ics_sync_bin_id") || "fred-dispatch-live-01";
 
-        function initSyncNetwork() {
-            syncStatusDisplay.textContent = `⚡ SYNC: CONNECTING (${syncChannelId})...`;
-            syncStatusDisplay.style.color = "var(--warning-yellow)";
-
-            // Using standard WSS over Port 443 to bypass corporate firewall restrictions
-            mqttClient = mqtt.connect('wss://broker.hivemq.com:8884/mqtt', {
-                clientId: myDeviceId,
-                keepalive: 30,
-                reconnectPeriod: 2000
-            });
-
-            mqttClient.on('connect', () => {
-                syncStatusDisplay.textContent = `🟢 SYNC: ONLINE (ROOM: ${syncChannelId})`;
-                syncStatusDisplay.style.color = "var(--accent-green)";
-                mqttClient.subscribe(`ics/dispatch/${syncChannelId}`, { qos: 1 });
-            });
-
-            mqttClient.on('offline', () => {
-                syncStatusDisplay.textContent = `🔴 SYNC: OFFLINE (LOCAL MODE)`;
-                syncStatusDisplay.style.color = "var(--alert-red)";
-            });
-
-            mqttClient.on('message', (topic, message) => {
-                try {
-                    const payload = JSON.parse(message.toString());
-                    if (payload.sender !== myDeviceId) {
-                        applyRemoteState(payload);
-                    }
-                } catch (e) {}
-            });
-        }
+        const STORAGE_KEY = "ics_dispatch_local_sync_state";
 
         syncStatusDisplay.addEventListener('click', () => {
-            let customId = prompt("Enter custom Sync Room Name for your devices:", syncChannelId);
-            if (customId && customId.trim() !== '') {
-                syncChannelId = customId.trim().toLowerCase().replace(/[^a-z0-9_-]/g, '');
-                localStorage.setItem("ics_sync_room_id", syncChannelId);
-                if (mqttClient) {
-                    mqttClient.end(true, () => initSyncNetwork());
-                } else {
-                    initSyncNetwork();
+            isCloudSync = !isCloudSync;
+            if (isCloudSync) {
+                let customId = prompt("Enter a shared sync ID/room name for your devices:", syncChannelId);
+                if (customId) {
+                    syncChannelId = customId.trim();
+                    localStorage.setItem("ics_sync_bin_id", syncChannelId);
                 }
+                syncStatusDisplay.textContent = `☁️ SYNC: CLOUD ACTIVE (${syncChannelId})`;
+                syncStatusDisplay.style.color = "var(--accent-blue)";
+                pullStateFromCloud();
+            } else {
+                syncStatusDisplay.textContent = "🔄 SYNC: LOCAL MODE (CLICK TO TOGGLE CLOUD)";
+                syncStatusDisplay.style.color = "var(--accent-green)";
             }
         });
 
-        function pushStateToNetwork() {
+        async function pushStateToCloud() {
             const stateData = {
-                sender: myDeviceId,
                 activeTrackers,
                 logHistory,
                 incidentTimer,
@@ -417,81 +393,106 @@
                 lastUpdated: Date.now()
             };
             
-            // Backup locally
-            localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(stateData));
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(stateData));
 
-            if (mqttClient && mqttClient.connected && !isReceivingRemoteState) {
-                mqttClient.publish(`ics/dispatch/${syncChannelId}`, JSON.stringify(stateData), { qos: 1, retain: false });
-            }
+            if (!isCloudSync) return;
+
+            try {
+                await fetch(`https://api.npoint.io/${syncChannelId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(stateData)
+                }).catch(() => {});
+            } catch (e) {}
         }
 
-        function applyRemoteState(data) {
-            if (!data) return;
-            isReceivingRemoteState = true;
-
-            if (data.thresholds) {
-                TIME_WARNING = data.thresholds.warning;
-                TIME_ALERT = data.thresholds.alert;
-                TIME_CRITICAL = data.thresholds.critical;
-                inputWarningMin.value = TIME_WARNING / 60000;
-                inputAlertMin.value = TIME_ALERT / 60000;
-                inputCriticalMin.value = TIME_CRITICAL / 60000;
-            }
-
-            const now = Date.now();
-            if (data.activeTrackers) {
-                activeTrackers = data.activeTrackers.map(t => {
-                    const tracker = Object.assign(new UnitTracker(t.name, t.category), t);
-                    if (tracker.isRunning) tracker.startTime = now;
-                    return tracker;
-                });
-            }
-
-            if (data.incidentTimer) {
-                incidentTimer = data.incidentTimer;
-                if (incidentTimer.isRunning) {
-                    incidentTimer.startTime = now;
-                    incidentNameInput.style.display = 'none';
-                    incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
-                    incidentNameDisplay.style.display = 'block';
-                    startIncidentBtn.style.display = 'none';
-                    endIncidentButton.style.display = 'block';
-                    logEntryInput.disabled = false;
-                    addLogButton.disabled = false;
-                } else {
-                    incidentNameInput.style.display = 'block';
-                    incidentNameDisplay.style.display = 'none';
-                    startIncidentBtn.style.display = 'block';
-                    endIncidentButton.style.display = 'none';
-                    logEntryInput.disabled = true;
-                    addLogButton.disabled = true;
-                }
-            }
-
-            if (data.logHistory) {
-                logHistory = data.logHistory;
-                incidentLogContainer.innerHTML = '';
-                logHistory.slice().reverse().forEach(logString => {
-                    const match = logString.match(/^\[(.*?)\]\s(.*)$/);
-                    const entry = document.createElement('div');
-                    entry.className = 'log-entry';
-                    if (match) {
-                        entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
-                    } else {
-                        entry.textContent = logString;
+        async function pullStateFromCloud() {
+            try {
+                let data = null;
+                if (isCloudSync) {
+                    const response = await fetch(`https://api.npoint.io/${syncChannelId}`).catch(() => null);
+                    if (response && response.ok) {
+                        data = await response.json();
                     }
-                    incidentLogContainer.appendChild(entry);
-                });
-                exportLogButton.disabled = logHistory.length === 0;
-            }
+                }
+                
+                if (!data) {
+                    const raw = localStorage.getItem(STORAGE_KEY);
+                    if (raw) data = JSON.parse(raw);
+                }
 
-            renderTrackers();
-            if ((activeTrackers.length > 0 || incidentTimer.isRunning) && !mainTimerInterval) {
-                startMainUpdateLoop();
-            }
+                if (data && data.activeTrackers) {
+                    if (data.thresholds) {
+                        TIME_WARNING = data.thresholds.warning;
+                        TIME_ALERT = data.thresholds.alert;
+                        TIME_CRITICAL = data.thresholds.critical;
+                        inputWarningMin.value = TIME_WARNING / 60000;
+                        inputAlertMin.value = TIME_ALERT / 60000;
+                        inputCriticalMin.value = TIME_CRITICAL / 60000;
+                    }
 
-            isReceivingRemoteState = false;
+                    const now = Date.now();
+                    const updatedTrackers = data.activeTrackers.map(t => {
+                        const existingTracker = activeTrackers.find(ext => ext.id === t.id);
+                        if (existingTracker && existingTracker.isRunning === t.isRunning) {
+                            return existingTracker;
+                        }
+                        const tracker = Object.assign(new UnitTracker(t.name, t.category, t.targetDurationMin), t);
+                        if (tracker.isRunning) tracker.startTime = now;
+                        return tracker;
+                    });
+                    
+                    activeTrackers = updatedTrackers;
+
+                    if (data.incidentTimer) {
+                        incidentTimer = data.incidentTimer;
+                        if (incidentTimer.isRunning) {
+                            incidentTimer.startTime = Date.now();
+                            incidentNameInput.style.display = 'none';
+                            incidentNameDisplay.textContent = `// ACTIVE INCIDENT: ${incidentTimer.name}`;
+                            incidentNameDisplay.style.display = 'block';
+                            startIncidentBtn.style.display = 'none';
+                            endIncidentButton.style.display = 'block';
+                            logEntryInput.disabled = false;
+                            addLogButton.disabled = false;
+                        } else {
+                            incidentNameInput.style.display = 'block';
+                            incidentNameDisplay.style.display = 'none';
+                            startIncidentBtn.style.display = 'block';
+                            endIncidentButton.style.display = 'none';
+                            logEntryInput.disabled = true;
+                            addLogButton.disabled = true;
+                        }
+                    }
+
+                    if (data.logHistory && data.logHistory.length !== logHistory.length) {
+                        logHistory = data.logHistory;
+                        incidentLogContainer.innerHTML = '';
+                        logHistory.slice().reverse().forEach(logString => {
+                            const match = logString.match(/^\[(.*?)\]\s(.*)$/);
+                            const entry = document.createElement('div');
+                            entry.className = 'log-entry';
+                            if (match) {
+                                entry.innerHTML = `<span class="log-time">[${match[1]}]</span> ${match[2]}`;
+                            } else {
+                                entry.textContent = logString;
+                            }
+                            incidentLogContainer.appendChild(entry);
+                        });
+                        exportLogButton.disabled = logHistory.length === 0;
+                    }
+
+                    renderTrackers();
+                    if ((activeTrackers.length > 0 || incidentTimer.isRunning) && !mainTimerInterval) {
+                        startMainUpdateLoop();
+                    }
+                }
+            } catch (e) {}
         }
+
+        window.addEventListener('storage', (e) => {
+            if (e.key === STORAGE_KEY && !isCloudSync) pullStateFromCloud();
+        });
 
         let audioCtx = null;
         function initAudioContext() {
@@ -518,6 +519,38 @@
             } catch (e) {}
         }
 
+        function playArrivalChime() {
+            try {
+                initAudioContext();
+                if (!audioCtx || audioCtx.state !== 'running') return;
+                const now = audioCtx.currentTime;
+                
+                const osc1 = audioCtx.createOscillator();
+                const osc2 = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                osc1.type = 'sawtooth';
+                osc2.type = 'square';
+
+                osc1.frequency.setValueAtTime(1046.50, now); // C6
+                osc1.frequency.setValueAtTime(1318.51, now + 0.15); // E6
+                osc2.frequency.setValueAtTime(523.25, now);
+                osc2.frequency.setValueAtTime(659.25, now + 0.15);
+
+                gain.gain.setValueAtTime(0.25, now);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+
+                osc1.connect(gain);
+                osc2.connect(gain);
+                gain.connect(audioCtx.destination);
+
+                osc1.start(now);
+                osc2.start(now);
+                osc1.stop(now + 0.4);
+                osc2.stop(now + 0.4);
+            } catch (e) {}
+        }
+
         ['click', 'keydown', 'touchstart'].forEach(eventType => {
             window.addEventListener(eventType, initAudioContext, { once: false, passive: true });
         });
@@ -535,19 +568,23 @@
             TIME_CRITICAL = critMin * 60000;
             logEntry(`THRESHOLDS UPDATED: Warning=${warnMin}m, Alert=${alertMin}m, Critical=${critMin}m`);
             renderTrackers();
-            pushStateToNetwork();
+            pushStateToCloud();
         });
 
         function formatTime(ms) {
-            const totalSeconds = Math.floor(ms / 1000);
-            const milliseconds = String(Math.floor(ms % 1000 / 10)).padStart(2, '0'); 
+            const isNegative = ms < 0;
+            const absMs = Math.abs(ms);
+            const totalSeconds = Math.floor(absMs / 1000);
+            const milliseconds = String(Math.floor(absMs % 1000 / 10)).padStart(2, '0'); 
             const seconds = String(totalSeconds % 60).padStart(2, '0');
             const minutes = String(Math.floor(totalSeconds / 60) % 60).padStart(2, '0');
             const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
-            return `${hours}:${minutes}:${seconds}.${milliseconds}`;
+            
+            return `${isNegative ? '-' : ''}${hours}:${minutes}:${seconds}.${milliseconds}`;
         }
         
-        function formatTimeHMSS(ms) {
+        // Kept purely for the shift clock formatting (no milliseconds)
+        function formatShiftTime(ms) {
             if (ms <= 0) return "00:00:00";
             const totalSeconds = Math.floor(ms / 1000);
             const seconds = String(totalSeconds % 60).padStart(2, '0');
@@ -564,14 +601,21 @@
         }
 
         class UnitTracker {
-            constructor(name, category) {
+            constructor(name, category, etaMinutes = 0) {
                 this.id = Date.now() + Math.floor(Math.random() * 1000);
                 this.name = name;
                 this.category = category;
                 this.totalTime = 0;
                 this.startTime = Date.now();
                 this.isRunning = true;
+                
+                this.isCountdown = etaMinutes > 0;
+                this.targetDurationMin = etaMinutes;
+                this.targetTimeMs = etaMinutes * 60000;
+                this.hasAlarmed = false;
+                this.isOnScene = false;
             }
+
             getTimeElapsed(now) {
                 if (this.isRunning) {
                     this.totalTime += (now - this.startTime);
@@ -579,17 +623,46 @@
                 }
                 return this.totalTime;
             }
-            getDisplayTime() { return formatTime(this.totalTime); }
-            getStatusClass() { return getTrackerStatusClass(this.totalTime); }
+
+            getRemainingTime() {
+                if (!this.isCountdown) return 0;
+                return this.targetTimeMs - this.totalTime; 
+            }
+
+            getDisplayTime() { 
+                if (this.isCountdown && !this.isOnScene) {
+                    return formatTime(this.getRemainingTime());
+                }
+                return formatTime(this.totalTime); 
+            }
+
+            getStatusClass() { 
+                if (this.isCountdown && !this.isOnScene) {
+                    const rem = this.getRemainingTime();
+                    if (rem <= 0) return 'arrival-alarm';
+                    if (rem <= 60000) return 'warning-status';
+                    return '';
+                }
+                return getTrackerStatusClass(this.totalTime); 
+            }
+
             toggle(shouldRun) {
                 if (shouldRun !== undefined) this.isRunning = shouldRun;
                 else this.isRunning = !this.isRunning;
                 if (this.isRunning) this.startTime = Date.now(); 
             }
+
             checkIn() {
                 this.totalTime = 0;
                 this.startTime = Date.now();
                 this.isRunning = true;
+                this.hasAlarmed = false;
+            }
+
+            markOnScene() {
+                this.isOnScene = true;
+                this.isCountdown = false; 
+                this.checkIn();
             }
         }
 
@@ -599,7 +672,7 @@
             shiftEnd.setHours(SHIFT_END_HOUR, 0, 0, 0);
             if (now.getTime() >= shiftEnd.getTime()) shiftEnd.setDate(shiftEnd.getDate() + 1);
             const timeRemaining = shiftEnd.getTime() - now.getTime();
-            shiftCountdownTimer.textContent = formatTimeHMSS(timeRemaining);
+            shiftCountdownTimer.textContent = formatShiftTime(timeRemaining);
             shiftCountdownTimer.style.color = timeRemaining < 3600000 ? 'var(--warning-yellow)' : 'var(--text-white)';
         }
 
@@ -696,7 +769,7 @@
 
                 logEntry(`INCIDENT ACTIVATED: ${name}.`);
                 if (!mainTimerInterval) startMainUpdateLoop(); 
-                pushStateToNetwork();
+                pushStateToCloud();
             }
         });
 
@@ -714,7 +787,7 @@
                 incidentDisplay.textContent = formatTime(incidentTimer.totalTime);
                 
                 if (activeTrackers.length === 0) stopMainUpdateLoop();
-                pushStateToNetwork();
+                pushStateToCloud();
             }
         });
 
@@ -723,7 +796,7 @@
             if (entryText && incidentTimer.isRunning) {
                 logEntry(entryText.toUpperCase());
                 logEntryInput.value = '';
-                pushStateToNetwork();
+                pushStateToCloud();
             }
         });
         
@@ -742,7 +815,7 @@
         });
 
         function updateStatusSummary() {
-            const alerts = activeTrackers.filter(t => t.totalTime >= TIME_ALERT).length; 
+            const alerts = activeTrackers.filter(t => (!t.isCountdown && t.totalTime >= TIME_ALERT) || (t.isCountdown && t.getRemainingTime() <= 0)).length; 
             totalCountDisplay.textContent = activeTrackers.length;
             alertCountDisplay.textContent = alerts;
             haltedCountDisplay.textContent = activeTrackers.filter(t => !t.isRunning).length;
@@ -760,7 +833,10 @@
                 const tracker = activeTrackers.find(t => t.id === id);
                 if (!tracker) return;
 
-                if (button.classList.contains('stop-btn') || button.classList.contains('stop-bin')) {
+                if (button.classList.contains('arrived-btn')) {
+                    tracker.markOnScene();
+                    logEntry(`UNIT ON SCENE: ${tracker.name} arrived. Switch to active scene timer.`);
+                } else if (button.classList.contains('stop-btn') || button.classList.contains('stop-bin')) {
                     tracker.toggle();
                     logEntry(`UNIT STATUS CHANGE: ${tracker.name} is now ${tracker.isRunning ? 'RESUMED' : 'HALTED'}.`);
                 } else if (button.classList.contains('check-btn')) {
@@ -771,7 +847,7 @@
                     return; 
                 }
                 renderTrackers();
-                pushStateToNetwork();
+                pushStateToCloud();
             };
         }
 
@@ -786,21 +862,28 @@
                 let actionButtonHTML = '';
                 let purgeButtonHTML = '';
                 if (!isWallboardMode) {
-                    const isAlertOrHigher = tracker.totalTime >= TIME_ALERT;
-                    if (isAlertOrHigher && tracker.isRunning) {
-                        actionButtonHTML = `<button class="check-btn">✅ CHECK</button>`;
-                    } else if (tracker.isRunning) {
-                        actionButtonHTML = `<button class="stop-bin">HALT</button>`;
+                    if (tracker.isCountdown) {
+                        actionButtonHTML = `<button class="arrived-btn">🚨 ON SCENE</button>`;
                     } else {
-                        actionButtonHTML = `<button class="resume-btn">RESUME</button>`;
+                        const isAlertOrHigher = tracker.totalTime >= TIME_ALERT;
+                        if (isAlertOrHigher && tracker.isRunning) {
+                            actionButtonHTML = `<button class="check-btn">✅ CHECK</button>`;
+                        } else if (tracker.isRunning) {
+                            actionButtonHTML = `<button class="stop-bin">HALT</button>`;
+                        } else {
+                            actionButtonHTML = `<button class="resume-btn">RESUME</button>`;
+                        }
                     }
                     purgeButtonHTML = `<button class="delete-btn">PURGE</button>`;
                 }
+
+                let modeTag = tracker.isCountdown ? `<span class="tracker-mode-tag">⏳ RESPONSE ETA (${tracker.targetDurationMin}m)</span>` : (tracker.isOnScene ? `<span class="tracker-mode-tag" style="color:var(--accent-green)">📍 ON SCENE</span>` : '');
 
                 li.innerHTML = `
                     <div class="tracker-info">
                         <span class="tracker-name">${tracker.name}</span>
                         <span class="tracker-category">${tracker.category}</span>
+                        ${modeTag}
                     </div>
                     <span class="tracker-time">${tracker.getDisplayTime()}</span>
                     <div class="tracker-actions">
@@ -816,14 +899,23 @@
         startTrackerButton.addEventListener('click', () => {
             const name = trackerNameInput.value.trim().toUpperCase() || "UNNAMED UNIT";
             const category = unitCategorySelect.value.toUpperCase(); 
-            const newTracker = new UnitTracker(name, category);
+            const etaMin = parseFloat(trackerEtaInput.value) || 0;
+
+            const newTracker = new UnitTracker(name, category, etaMin);
             activeTrackers.push(newTracker);
             trackerNameInput.value = ''; 
+            trackerEtaInput.value = '';
             unitCategorySelect.value = 'UNKNOWN';
-            logEntry(`UNIT ACTIVATED: ${name} (${category})`);
+
+            if (etaMin > 0) {
+                logEntry(`UNIT DISPATCHED: ${name} (${category}) - Response Timer: ${etaMin} min ETA.`);
+            } else {
+                logEntry(`UNIT ACTIVATED: ${name} (${category})`);
+            }
+
             if (!mainTimerInterval) startMainUpdateLoop();
             renderTrackers();
-            pushStateToNetwork();
+            pushStateToCloud();
         });
 
         function deleteUnit(id) {
@@ -832,7 +924,7 @@
             activeTrackers = activeTrackers.filter(t => t.id !== id);
             renderTrackers();
             if (activeTrackers.length === 0 && !incidentTimer.isRunning) stopMainUpdateLoop();
-            pushStateToNetwork();
+            pushStateToCloud();
         }
 
         resetButton.addEventListener('click', () => {
@@ -841,7 +933,7 @@
                 if (!incidentTimer.isRunning) stopMainUpdateLoop();
                 renderTrackers();
                 logEntry("GLOBAL WIPE executed.");
-                pushStateToNetwork();
+                pushStateToCloud();
             }
         });
 
@@ -854,6 +946,14 @@
                 if (tracker.isRunning) {
                     const wasState = tracker.getStatusClass();
                     tracker.getTimeElapsed(now);
+                    
+                    if (tracker.isCountdown && tracker.getRemainingTime() <= 0 && !tracker.hasAlarmed) {
+                        tracker.hasAlarmed = true;
+                        playArrivalChime();
+                        logEntry(`🚨 ETA EXPIRED / ARRIVAL ALARM: Unit ${tracker.name}`);
+                        needsFullRender = true;
+                    }
+
                     const newState = tracker.getStatusClass();
                     if (wasState !== newState) {
                         needsFullRender = true;
@@ -874,20 +974,18 @@
              if (mainTimerInterval) { clearInterval(mainTimerInterval); mainTimerInterval = null; }
         }
 
-        function loadLocalBackup() {
-            const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-            if (raw) {
-                try {
-                    applyRemoteState(JSON.parse(raw));
-                } catch (e) {}
-            }
-        }
-
-        function initializeApp() {
+        async function initializeApp() {
             attachUnitActionListeners();
-            loadLocalBackup();
-            initSyncNetwork();
+            await pullStateFromCloud();
+            
+            setInterval(() => {
+                if (isCloudSync) pullStateFromCloud();
+            }, 3000);
+            
             trackerNameInput.addEventListener('keypress', (e) => {
+                 if (e.key === 'Enter') startTrackerButton.click();
+            });
+            trackerEtaInput.addEventListener('keypress', (e) => {
                  if (e.key === 'Enter') startTrackerButton.click();
             });
         }
